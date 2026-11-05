@@ -1,0 +1,10 @@
+[package]
+name = "burrowd"
+description = "Per-user background service that owns agent sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-protocol.workspace = true
