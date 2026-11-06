@@ -1,0 +1,189 @@
+# Implementation plan
+
+> **Status:** M0 done; M1 is next. Last updated 2026-11-06.
+>
+> **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
+
+The order is chosen to retire the biggest unknowns first:
+1. Can we drive all four agents through one event model?
+2. Does a durable flow engine hold up?
+3. Only then: the GitHub flow, remote control and media.
+
+Every milestone ends with something you can run.
+
+## Overview
+
+| # | Milestone | Outcome | Status |
+|---|---|---|---|
+| M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
+| M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ⏳ next |
+| M2 | Agent sessions | All four agents, driven through one event model | |
+| M3 | Desktop app v1 | Usable every day for chatting with agents | |
+| M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
+| M5 | Flow engine core | YAML flows run durably, with custom steps | |
+| M6 | GitHub and `deliver-issue` | Issue to merged PR, end to end | |
+| M7 | Agent switching | Runs survive usage limits by switching agents | |
+| M8 | Remote control | Approve and steer from the phone | |
+| M9 | Creative flows | Picture book, then a few-minute story video | |
+
+---
+
+## M0: Foundation ✅
+
+- [x] Cargo workspace with `burrow-protocol`, `burrowd` and `burrow-app`
+- [x] GPUI 0.2.2 window, with Burrow's own Windows manifest (D-010)
+- [x] Architecture, protocol, flow and decision documents (this folder)
+
+## M1: Protocol and service skeleton
+
+- [ ] **`burrow-protocol` types:** the JSON-RPC envelope, `initialize`, errors, `events/subscribe`, and the `index` stream events. Use serde with camelCase field names.
+- [ ] **Schema export:** generate a JSON Schema with `schemars`, written to `schema/burrow-protocol.schema.json` by `cargo xtask schema`. A test fails if the file is out of date.
+- [ ] **`burrow-store`:** an SQLite event store (`rusqlite`, WAL mode) that appends and reads streams with gap-free sequence numbers. Database changes go through numbered migrations.
+- [ ] **`burrowd` server:**
+  - named pipe server (`tokio`), restricted to the current user;
+  - one task per connection;
+  - `initialize`, `$/ping` and `events/subscribe` with replay.
+- [ ] **`burrow-client`:** connection handling plus typed calls.
+- [ ] **`burrowctl`:** `status`, and `events tail <stream>`.
+- [ ] **Logging:** `burrowd` logs with `tracing` to `%LOCALAPPDATA%\Burrow\logs`.
+
+**Done when** an integration test passes:
+1. Start `burrowd`, subscribe to `index`, append events.
+2. Kill and restart `burrowd`.
+3. Resubscribe with the last seen `seq`: every event is received exactly once, in order.
+
+## M2: Agent sessions
+
+**Prerequisites:**
+- Node.js. v24 is already installed.
+- Claude Code CLI, Codex CLI and Cursor CLI (`agent`). None are installed yet.
+- Muse Code. 1.4.9 is already installed.
+
+**Work:**
+- [ ] **Agent detection** (`agent/list`): versions, login state, models.
+- [ ] **ACP adapter** using the `agent-client-protocol` crate:
+  - [ ] Cursor: `agent acp`
+  - [ ] Claude Code: `@agentclientprotocol/claude-agent-acp`
+  - [ ] Codex: `@agentclientprotocol/codex-acp`
+- [ ] **MSP adapter for Muse** (`muse serve`). Generate its types from `muse schema`, and test with `--provider echo`.
+- [ ] **Session methods and events:** sessions are stored as `session:<id>` streams.
+- [ ] **Permission requests become inbox items**, answered through `inbox/respond`.
+- [ ] **Job Objects** for every agent process. Keep Windows awake while sessions are working.
+- [ ] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report.
+- [ ] **`burrowctl session`:** `new`, `prompt`, `watch`, and `inbox respond`.
+
+**Done when:**
+- From `burrowctl`, each of the four agents can be prompted, its answer streams back, and a permission request can be approved from the inbox.
+- Stopping a session leaves no stray processes, as checked by an automated test.
+
+## M3: Desktop app v1
+
+- [ ] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running.
+- [ ] **Decide on `gpui-component`** (now 0.9.0) versus our own widgets. Record the decision in `decisions.md`.
+- [ ] **Layout:** a sidebar with projects, sessions and runs (runs are empty for now), and an inbox panel.
+- [ ] **Session view:**
+  - a virtualized transcript;
+  - markdown that renders while it streams;
+  - tool calls and diffs;
+  - a prompt box.
+- [ ] **Model picker and session state indicators.**
+- [ ] **Startup time and memory checks:** target cold start under 300 ms to the first frame.
+
+**Done when** you prefer Burrow over the agents' own TUIs for everyday chats.
+
+## M4: Terminal sessions
+
+- [ ] **ConPTY** through `portable-pty`. Terminal emulation in `burrowd` with `alacritty_terminal`.
+- [ ] **Terminal methods:** `terminal/attach` (snapshot), `terminal/update` (changed lines only), `terminal/input` and `terminal/resize`.
+- [ ] **A GPUI terminal view**, drawn from cell runs.
+- [ ] **Decide terminal resize behaviour** when several clients are attached (open question in `protocol.md`).
+
+**Done when** any agent's TUI runs inside Burrow, and a second client can detach and attach without losing anything.
+
+## M5: Flow engine core
+
+- [ ] **Flow loader:** YAML, a flow JSON Schema, a validator, and MiniJinja templating.
+- [ ] **Engine:**
+  - a persisted state machine for runs and steps;
+  - steps that wait (human, timer, event);
+  - resuming after a restart.
+- [ ] **Step kinds:** `agent`, `action: shell`, `human`, `run` (simple and RPC mode), `flow`. Add `script: lua` once a real flow needs it.
+- [ ] **Control structures:** `needs`, `parallel`, `when`, `foreach`, `loop`, `retry`, `timeout`, `allowFailure`, `onFailure`, handlers.
+- [ ] **Roles and picking a candidate.** Switching agents waits until M7.
+- [ ] **Output caching** by input hash, and `run/rerunFrom`.
+- [ ] **Dry runs** with fake agents and providers.
+- [ ] **Run methods and events.** `burrowctl flow check | run | watch`.
+- [ ] **A runs view in the desktop app:** the graph with live step states.
+
+**Done when** a test flow finishes correctly even if `burrowd` is killed partway through. The test flow contains an agent step, a human approval, a Python custom step and a `foreach`.
+
+## M6: GitHub and `deliver-issue`
+
+- [ ] **A GitHub App setup guide** in `docs/github-app.md`, plus auth: App installation tokens for `burrow[bot]`, and your own token for actions you make yourself.
+- [ ] **`IssueTracker` and `CodeHost` traits**, with GitHub implementations using `octocrab`.
+- [ ] **Git operations** through the `git` CLI: worktrees, commits, pushes. `.burrow/` goes into `.git/info/exclude`.
+- [ ] **Actions:**
+  - [ ] `github.openPr`
+  - [ ] `github.markReady`
+  - [ ] `github.waitReview`
+  - [ ] `github.merge`
+- [ ] **Polling:** GitHub is polled using ETags. Webhooks come later, through the relay.
+- [ ] **The `deliver-issue` flow and its prompts**, as drafted in `flows.md`.
+
+**Done when** labelling an issue in a test repository ends in a merged PR, after one AI review round and one round of your review on GitHub.
+
+## M7: Agent switching
+
+- [ ] **Agents keep a progress checklist:** the agent prompts require `.burrow/progress.md`.
+- [ ] **Handoff briefs:** generated, then given to the next candidate.
+- [ ] **Switching rules:** `waitIfResetWithinMinutes`, the order of candidates, and skipping candidates that are limited or logged out.
+- [ ] **Quota tracking per provider**, shown in the UI.
+- [ ] **A way to simulate a usage limit** in tests.
+
+**Done when:**
+- A simulated limit in the middle of `implement` switches to the next agent, and the run still produces a working PR.
+- A limit that resets soon makes the run wait instead.
+
+## M8: Remote control
+
+**Prerequisite:** Tailscale.
+
+- [ ] **A WebSocket listener**, on the Tailscale interface only.
+- [ ] **Pairing:** a QR code, Ed25519 device keys, the challenge/response login, and per-device permissions. Devices can be revoked.
+- [ ] **A devices screen** in the desktop app.
+- [ ] **The phone client.** Its technology isn't decided yet (Q2). First version: inbox, runs, sessions read-only, and answering inbox items.
+
+**Done when:**
+- A plan can be approved from the phone over Tailscale.
+- A revoked phone is locked out immediately.
+
+## M9: Creative flows
+
+**Prerequisites:** ffmpeg, and accounts with the chosen media providers.
+
+- [ ] **Media providers:**
+  - ComfyUI, running locally on the R9700 (check AMD support first);
+  - one cloud image provider;
+  - one cloud video provider;
+  - one text-to-speech provider.
+- [ ] **`generate:` steps and ffmpeg actions.** Encoding uses the GPU (AMF) where possible.
+- [ ] **A native media player spike in GPUI:** Windows Media Foundation, or ffmpeg/libmpv decoding into GPUI. This is the biggest risk in M9, so do it first.
+- [ ] **The timeline format**, plus OpenTimelineIO export.
+- [ ] **The `picture-book` flow.**
+- [ ] **The `story-to-video` flow:** bible, narration first, animatic, then upgrading shots one by one.
+
+**Done when** a 3-minute video renders from a premise, with storyboard approval, and editing one scene re-renders only that scene.
+
+---
+
+## Open decisions
+
+| # | Question | Needed by | Notes |
+|---|---|---|---|
+| Q1 | Personal tool, or a product you'll distribute? | M2 (login model), M8 (relay) | Changes the vendor-terms constraints and whether a relay service is needed |
+| Q2 | Phone client: native (Swift/Kotlin), or shared code? | M8 | |
+| Q3 | First SDK language for code flows: Rust, TypeScript or Python? | After M5 | Levels 1 and 2 work with any language |
+| Q4 | Can a PR auto-merge once the reviewer and CI pass? | M6 | `deliver-issue` reads `project.settings.autoMerge` |
+| Q5 | Creative focus: few-minute videos are confirmed. Also books, comics, short vertical videos? | M9 | |
+| Q6 | Cloud generation budget, or local-first? | M9 | |
+| Q7 | Terminal resize with several clients attached | M4 | |
