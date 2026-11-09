@@ -9,7 +9,10 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Error, Result};
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_events.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_events.sql"),
+    include_str!("../migrations/0002_entities.sql"),
+];
 
 /// The schema version this build creates and understands: the number of
 /// migrations it contains.

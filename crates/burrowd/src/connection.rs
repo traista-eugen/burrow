@@ -2,8 +2,13 @@
 //!
 //! Each connection runs as a few tasks:
 //!
-//! - **The reader** (this module's main loop) reads one line at a time and handles it to the end
-//!   before reading the next, so requests are answered in the order they arrive.
+//! - **The reader** (this module's main loop) reads one line at a time. It handles the handshake
+//!   and `events/subscribe` and `events/unsubscribe` itself, before reading the next line, since
+//!   they change the connection. Every other request runs on a task of its own (D-019), so a
+//!   slow call doesn't hold up the connection, and answers can come in any order. At most
+//!   [`MAX_IN_FLIGHT`] run at once; the reader waits for one to finish before taking more.
+//! - **`$/cancel`** sets the cancel flag of a running request; [`crate::methods`] decides what
+//!   giving up means for each method.
 //! - **The writer** drains a bounded queue of outgoing lines into the pipe, several at a time.
 //! - **One forwarder per subscription** replays history from the store in pages, then forwards
 //!   live events, dropping any seq it has already sent.
@@ -15,27 +20,32 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use burrow_protocol::methods::{DebugAppend, EventsSubscribe, EventsUnsubscribe, Initialize, Ping};
-use burrow_protocol::notifications::Cancel;
+use burrow_protocol::methods::{EventsSubscribe, EventsUnsubscribe, Initialize};
+use burrow_protocol::notifications::Cancel as CancelNotification;
 use burrow_protocol::{
-    DebugAppendParams, DebugAppendResult, Empty, ErrorKind, ErrorObject, InitializeParams,
-    InitializeResult, Message, Method, Notification, NotificationMethod, PROTOCOL_VERSION, Request,
-    RequestId, Response, ServerCapabilities, ServerInfo, StreamName, SubscribeParams,
-    SubscribeResult,
+    Empty, ErrorKind, ErrorObject, InitializeParams, InitializeResult, Message, Method,
+    Notification, NotificationMethod, PROTOCOL_VERSION, Request, RequestId, Response,
+    ServerCapabilities, ServerInfo, StreamName, SubscribeParams, SubscribeResult,
 };
 use burrow_transport::{LineReader, push_line};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
+use crate::agents::Agents;
+use crate::cancel::Cancel;
 use crate::hub::{Hub, LiveEvent};
-use crate::{ids, wire};
+use crate::projects::Projects;
+use crate::sessions::Sessions;
+use crate::{ids, methods, wire};
 
 /// Lines waiting to be written to one client.
 const OUTGOING_QUEUE: usize = 256;
+/// Requests one connection may have running at once (D-019).
+pub const MAX_IN_FLIGHT: usize = 64;
 /// Live events one subscription may hold while the client catches up. When it overflows, the
 /// connection is closed (D-015).
 const LIVE_BUFFER: usize = 1024;
@@ -51,6 +61,12 @@ pub struct Context {
     pub hub: Hub,
     /// `--dev`: development-only methods are enabled.
     pub dev: bool,
+    /// Projects.
+    pub projects: Arc<Projects>,
+    /// Agents, detection and usage.
+    pub agents: Arc<Agents>,
+    /// Sessions and the inbox.
+    pub sessions: Arc<Sessions>,
 }
 
 /// Serves one client until it disconnects or has to be disconnected.
@@ -80,6 +96,8 @@ where
         close: close.clone(),
         initialized: false,
         subscriptions: HashMap::new(),
+        in_flight: Arc::default(),
+        permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
     };
     let reason = tokio::select! {
         reason = connection.read_loop(LineReader::new(reader)) => reason,
@@ -149,6 +167,9 @@ struct Connection {
     close: Arc<Notify>,
     initialized: bool,
     subscriptions: HashMap<StreamName, Subscription>,
+    /// Requests running on their own tasks, by id, with the flag `$/cancel` sets.
+    in_flight: Arc<Mutex<HashMap<RequestId, Cancel>>>,
+    permits: Arc<Semaphore>,
 }
 
 impl Connection {
@@ -189,7 +210,7 @@ impl Connection {
         match Message::parse(line) {
             Ok(Message::Request(request)) => self.handle_request(request).await,
             Ok(Message::Notification(notification)) => {
-                handle_notification(&notification);
+                self.handle_notification(&notification);
                 Ok(())
             }
             Ok(Message::Response(response)) => {
@@ -222,10 +243,6 @@ impl Connection {
         }
 
         match method.as_str() {
-            Ping::NAME => {
-                let result = request.params_as::<Ping>().map(|_| Empty {});
-                self.reply::<Ping>(id, result).await
-            }
             EventsSubscribe::NAME => match request.params_as::<EventsSubscribe>() {
                 Ok(params) => self.subscribe(id, params).await,
                 Err(error) => self.reply::<EventsSubscribe>(id, Err(error)).await,
@@ -240,18 +257,66 @@ impl Connection {
                 };
                 self.reply::<EventsUnsubscribe>(id, result).await
             }
-            // Development-only: without --dev it doesn't exist (protocol.md).
-            DebugAppend::NAME if self.context.dev => {
-                let result = match request.params_as::<DebugAppend>() {
-                    Ok(params) => self.debug_append(params).await,
-                    Err(error) => Err(error),
-                };
-                self.reply::<DebugAppend>(id, result).await
+            _ => self.spawn_request(request).await,
+        }
+    }
+
+    /// Runs a request on its own task (D-019). Its answer is queued when it finishes.
+    async fn spawn_request(&mut self, request: Request) -> Result<(), Gone> {
+        let id = request.id.clone();
+        // Waits while MAX_IN_FLIGHT requests run: the client is sending faster than they finish.
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed");
+        let cancel = Cancel::new();
+        let duplicate = {
+            let mut in_flight = lock(&self.in_flight);
+            let duplicate = in_flight.contains_key(&id);
+            if !duplicate {
+                in_flight.insert(id.clone(), cancel.clone());
             }
-            _ => {
-                let error = ErrorObject::method_not_found(&method);
-                self.send(Response::error(Some(id), error).to_line()).await
+            duplicate
+        };
+        if duplicate {
+            let error = ErrorObject::invalid_request(format!(
+                "request {id} is still running; ids must be unique among pending requests"
+            ));
+            return self.send(Response::error(Some(id), error).to_line()).await;
+        }
+        let context = self.context.clone();
+        let out = self.out.clone();
+        let in_flight = self.in_flight.clone();
+        tokio::spawn(
+            async move {
+                let response = methods::handle(&context, request, cancel).await;
+                lock(&in_flight).remove(&id);
+                // The connection may be gone; the work is done either way.
+                let _ = out.send(response.to_line().into()).await;
+                drop(permit);
             }
+            .in_current_span(),
+        );
+        Ok(())
+    }
+
+    fn handle_notification(&self, notification: &Notification) {
+        if notification.method != CancelNotification::NAME {
+            debug!(method = %notification.method, "ignoring an unknown notification");
+            return;
+        }
+        match notification.params_as::<CancelNotification>() {
+            Ok(params) => match lock(&self.in_flight).get(&params.id) {
+                Some(cancel) => {
+                    debug!(id = %params.id, "cancelling a request");
+                    cancel.cancel();
+                }
+                // Finished already, or never sent: nothing to do.
+                None => debug!(id = %params.id, "$/cancel for a request that isn't running"),
+            },
+            Err(error) => debug!(%error, "ignoring a malformed $/cancel"),
         }
     }
 
@@ -364,34 +429,10 @@ impl Connection {
             debug!(%stream, "unsubscribed");
         }
     }
-
-    async fn debug_append(
-        &self,
-        params: DebugAppendParams,
-    ) -> Result<DebugAppendResult, ErrorObject> {
-        wire::check_appendable(&params.stream, &params.event)
-            .map_err(ErrorObject::invalid_params)?;
-        let record = wire::record(&params.event);
-        let appended = self
-            .context
-            .hub
-            .append(params.stream, vec![record])
-            .await
-            .map_err(|error| ErrorObject::internal(error.to_string()))?;
-        Ok(DebugAppendResult {
-            seq: *appended.seqs.start(),
-        })
-    }
 }
 
-fn handle_notification(notification: &Notification) {
-    if notification.method == Cancel::NAME {
-        // Every request is answered before the next line is read, so by the time a $/cancel
-        // arrives there is nothing left to cancel.
-        debug!("ignoring $/cancel: no request runs long enough to cancel yet");
-    } else {
-        debug!(method = %notification.method, "ignoring an unknown notification");
-    }
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// An active subscription. Dropping it stops its forwarder and unregisters it from the store

@@ -9,6 +9,12 @@
 //! payload. It doesn't depend on `burrow-protocol`; mapping records to wire
 //! types is `burrowd`'s job. So is notifying live subscribers.
 //!
+//! Next to the log, an **entities** table keeps the current state of each
+//! entity (a project, a session, an inbox item) as a JSON document, so
+//! `burrowd` doesn't replay every stream at startup (D-017). [`Store::commit`]
+//! writes events to several streams and entity rows in one transaction; rows
+//! are never written without the events that describe the change.
+//!
 //! ```
 //! use burrow_store::{NewEvent, Store};
 //! use serde_json::json;
@@ -39,7 +45,8 @@
 //!   lock before reading. Appends from several threads or processes, each with
 //!   its own `Store` on the same file, are serialized. A
 //!   `UNIQUE (stream, seq)` constraint is the backstop.
-//! - **All or nothing.** A multi-event append commits every event or none.
+//! - **All or nothing.** A multi-event append commits every event or none, and
+//!   so does a [`Store::commit`] across several streams and entities.
 //! - **Durable.** The database runs in WAL mode with `synchronous = FULL`.
 //!   Once `append` returns, its events survive the process being killed and,
 //!   as long as the disk honours flushes, the machine losing power (D-012).
@@ -189,6 +196,85 @@ pub struct Appended {
     pub at_ms: i64,
 }
 
+/// One stream's events within a [`Store::commit`].
+#[derive(Debug, Clone, Copy)]
+pub struct Append<'a> {
+    /// The stream. Must not be empty.
+    pub stream: &'a str,
+    /// The events, in order. Must not be empty.
+    pub events: &'a [NewEvent],
+}
+
+/// A change to the entities table, made by [`Store::commit`].
+#[derive(Debug, Clone)]
+pub enum EntityWrite {
+    /// Inserts or replaces an entity's document.
+    Put {
+        /// What sort of entity, for example `session`. Must not be empty.
+        kind: String,
+        /// Its id. Must not be empty.
+        id: String,
+        /// Its current state, stored exactly as given.
+        body: Box<RawValue>,
+    },
+    /// Removes an entity. Removing one that doesn't exist does nothing.
+    Delete {
+        /// What sort of entity.
+        kind: String,
+        /// Its id.
+        id: String,
+    },
+}
+
+impl EntityWrite {
+    /// An [`EntityWrite::Put`] of `body` serialized to JSON.
+    pub fn put<T: Serialize + ?Sized>(
+        kind: impl Into<String>,
+        id: impl Into<String>,
+        body: &T,
+    ) -> Result<Self> {
+        Ok(Self::Put {
+            kind: kind.into(),
+            id: id.into(),
+            body: serde_json::value::to_raw_value(body)?,
+        })
+    }
+
+    /// An [`EntityWrite::Delete`].
+    pub fn delete(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::Delete {
+            kind: kind.into(),
+            id: id.into(),
+        }
+    }
+
+    fn key(&self) -> (&str, &str) {
+        match self {
+            Self::Put { kind, id, .. } | Self::Delete { kind, id } => (kind, id),
+        }
+    }
+}
+
+/// An entity's current state, read from the entities table.
+#[derive(Debug, Clone)]
+pub struct Entity {
+    /// What sort of entity.
+    pub kind: String,
+    /// Its id.
+    pub id: String,
+    /// Its document, exactly as it was written.
+    pub body: Box<RawValue>,
+    /// When it was last written, in Unix milliseconds (wall clock).
+    pub updated_ms: i64,
+}
+
+impl Entity {
+    /// Deserializes the document into `T`.
+    pub fn body<T: DeserializeOwned>(&self) -> Result<T> {
+        Ok(serde_json::from_str(self.body.get())?)
+    }
+}
+
 /// An SQLite event store. Owns one connection.
 ///
 /// See the [crate docs](crate) for the guarantees and for how to use it from
@@ -256,43 +342,148 @@ impl Store {
     /// Fails with [`Error::EmptyAppend`] if `events` is empty, and with
     /// [`Error::EmptyStream`] or [`Error::EmptyEventType`] for empty names.
     pub fn append(&mut self, stream: &str, events: &[NewEvent]) -> Result<Appended> {
-        if stream.is_empty() {
-            return Err(Error::EmptyStream);
+        let mut appended = self.commit(&[Append { stream, events }], &[])?;
+        Ok(appended.remove(0))
+    }
+
+    /// Appends to several streams and writes entity rows, all in one
+    /// transaction: everything is stored or, on error, nothing is.
+    ///
+    /// Returns one [`Appended`] per [`Append`], in order. Each append gets
+    /// consecutive seqs after its stream's head at that point, so two appends
+    /// to the same stream in one commit follow each other. Every event of the
+    /// commit shares one timestamp, which is also the rows' `updated_ms`.
+    /// Entity writes apply in order; a later write to the same entity wins.
+    ///
+    /// Fails with [`Error::EmptyCommit`] if there is nothing to write,
+    /// [`Error::EmptyAppend`] if an append has no events, and with
+    /// [`Error::EmptyStream`], [`Error::EmptyEventType`] or
+    /// [`Error::EmptyEntityKey`] for empty names.
+    pub fn commit(
+        &mut self,
+        appends: &[Append<'_>],
+        entities: &[EntityWrite],
+    ) -> Result<Vec<Appended>> {
+        if appends.is_empty() && entities.is_empty() {
+            return Err(Error::EmptyCommit);
         }
-        if events.is_empty() {
-            return Err(Error::EmptyAppend);
+        for append in appends {
+            if append.stream.is_empty() {
+                return Err(Error::EmptyStream);
+            }
+            if append.events.is_empty() {
+                return Err(Error::EmptyAppend);
+            }
+            if append
+                .events
+                .iter()
+                .any(|event| event.event_type.is_empty())
+            {
+                return Err(Error::EmptyEventType);
+            }
         }
-        if events.iter().any(|event| event.event_type.is_empty()) {
-            return Err(Error::EmptyEventType);
+        if entities.iter().any(|write| {
+            let (kind, id) = write.key();
+            kind.is_empty() || id.is_empty()
+        }) {
+            return Err(Error::EmptyEntityKey);
         }
 
-        // IMMEDIATE takes the write lock now, before the head is read, so no
-        // other connection can append to the stream in between.
+        // IMMEDIATE takes the write lock now, before any head is read, so no
+        // other connection can append to these streams in between.
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let head = head_of(&tx, stream)?;
         let at_ms = now_ms();
+        let mut results = Vec::with_capacity(appends.len());
         {
             let mut insert = tx.prepare_cached(
                 "INSERT INTO events (stream, seq, type, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
-            for (seq, event) in (head + 1..).zip(events) {
-                insert.execute(params![
-                    stream,
-                    sql_seq(seq),
-                    event.event_type,
-                    event.payload.get(),
+            for append in appends {
+                // Read inside the transaction, so an earlier append to the same
+                // stream in this commit is already counted.
+                let head = head_of(&tx, append.stream)?;
+                for (seq, event) in (head + 1..).zip(append.events) {
+                    insert.execute(params![
+                        append.stream,
+                        sql_seq(seq),
+                        event.event_type,
+                        event.payload.get(),
+                        at_ms,
+                    ])?;
+                }
+                results.push(Appended {
+                    seqs: head + 1..=head + append.events.len() as Seq,
                     at_ms,
-                ])?;
+                });
+            }
+        }
+        {
+            let mut put = tx.prepare_cached(
+                "INSERT INTO entities (kind, id, body, updated) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (kind, id) DO UPDATE SET body = excluded.body, updated = excluded.updated",
+            )?;
+            let mut delete =
+                tx.prepare_cached("DELETE FROM entities WHERE kind = ?1 AND id = ?2")?;
+            for write in entities {
+                match write {
+                    EntityWrite::Put { kind, id, body } => {
+                        put.execute(params![kind, id, body.get(), at_ms])?;
+                    }
+                    EntityWrite::Delete { kind, id } => {
+                        delete.execute(params![kind, id])?;
+                    }
+                }
             }
         }
         tx.commit()?;
+        Ok(results)
+    }
 
-        Ok(Appended {
-            seqs: head + 1..=head + events.len() as Seq,
-            at_ms,
+    /// Every entity of `kind`, ordered by id.
+    pub fn entities(&self, kind: &str) -> Result<Vec<Entity>> {
+        let mut select = self
+            .conn
+            .prepare_cached("SELECT id, body, updated FROM entities WHERE kind = ?1 ORDER BY id")?;
+        let rows = select.query_map([kind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut entities = Vec::new();
+        for row in rows {
+            let (id, body, updated_ms) = row?;
+            entities.push(Entity {
+                kind: kind.to_owned(),
+                id,
+                body: RawValue::from_string(body)?,
+                updated_ms,
+            });
+        }
+        Ok(entities)
+    }
+
+    /// One entity, or `None` if there is no entity of `kind` with `id`.
+    pub fn entity(&self, kind: &str, id: &str) -> Result<Option<Entity>> {
+        let row = self
+            .conn
+            .prepare_cached("SELECT body, updated FROM entities WHERE kind = ?1 AND id = ?2")?
+            .query_row([kind, id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        row.map(|(body, updated_ms)| {
+            Ok(Entity {
+                kind: kind.to_owned(),
+                id: id.to_owned(),
+                body: RawValue::from_string(body)?,
+                updated_ms,
+            })
         })
+        .transpose()
     }
 
     /// Reads up to `limit` events of `stream` with a seq greater than `after`,

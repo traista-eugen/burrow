@@ -738,6 +738,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "burrow-agents"
+version = "0.1.0"
+dependencies = [
+ "burrow-protocol",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "burrow-app"
 version = "0.1.0"
 dependencies = [
@@ -796,6 +811,7 @@ dependencies = [
  "burrow-client",
  "burrow-protocol",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -804,6 +820,7 @@ dependencies = [
 name = "burrowd"
 version = "0.1.0"
 dependencies = [
+ "burrow-agents",
  "burrow-client",
  "burrow-protocol",
  "burrow-store",

@@ -3,8 +3,9 @@
 //!
 //! `burrowd` keeps an append-only log of events for each stream, numbered from 1 with no gaps
 //! (D-005). Event `type` names are unique across all streams, so one [`Event`] enum decodes any
-//! of them. Version 0 defines the `index` stream's events; session and run events arrive with
-//! M2 and M5, and until then decode as [`Event::Unknown`].
+//! of them. Version 0 defines the `index` stream's events and, since M2, the session events
+//! (their payloads live in [`crate::session`]). Run events arrive with M5, and until then decode
+//! as [`Event::Unknown`].
 
 use std::borrow::{Borrow, Cow};
 use std::fmt;
@@ -14,6 +15,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 use crate::open_enum::doc_text;
+use crate::session::{
+    AgentMessageChunk, AgentThoughtChunk, LimitReached, ModelChanged, PermissionRequested,
+    PermissionResolved, Plan, StateChanged, TerminalOpened, ToolCall, ToolCallUpdate, TurnEnded,
+    Usage, UserMessage,
+};
 use crate::time::Timestamp;
 
 /// The name of an event stream: `index`, `session:<sessionId>` or `run:<runId>`.
@@ -129,7 +135,7 @@ pub struct UnsubscribeParams {
 }
 
 /// `events/event` params: one event from a subscribed stream.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
     /// The stream the event belongs to.
@@ -187,6 +193,9 @@ pub struct InboxSource {
     /// The session that asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The tool call a permission request is about, within `sessionId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Whether an inbox item still needs an answer.
@@ -330,7 +339,7 @@ macro_rules! event_enum {
         }
     ) => {
         $(#[doc = $doc])*
-        #[derive(Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq)]
         pub enum $name {
             $(
                 $(#[doc = $vdoc])*
@@ -476,6 +485,34 @@ event_enum! {
         InboxItemAdded = "inboxItemAdded",
         /// `index`: an inbox item was answered or expired.
         InboxItemResolved = "inboxItemResolved",
+        /// `session:<id>`: the prompt that started a turn.
+        UserMessage = "userMessage",
+        /// `session:<id>`: a piece of the agent's answer.
+        AgentMessageChunk = "agentMessageChunk",
+        /// `session:<id>`: a piece of the agent's visible reasoning.
+        AgentThoughtChunk = "agentThoughtChunk",
+        /// `session:<id>`: the agent started, or asks to start, a tool call.
+        ToolCall = "toolCall",
+        /// `session:<id>`: a tool call changed.
+        ToolCallUpdate = "toolCallUpdate",
+        /// `session:<id>`: the agent's current plan.
+        Plan = "plan",
+        /// `session:<id>`: the agent asks for permission; an inbox item holds the question.
+        PermissionRequested = "permissionRequested",
+        /// `session:<id>`: a permission request was answered or expired.
+        PermissionResolved = "permissionResolved",
+        /// `session:<id>`: a turn is over.
+        TurnEnded = "turnEnded",
+        /// `session:<id>`: tokens and cost of a turn.
+        Usage = "usage",
+        /// `session:<id>`: a provider limit was hit.
+        LimitReached = "limitReached",
+        /// `session:<id>`: the session moved to a new state.
+        StateChanged = "stateChanged",
+        /// `session:<id>`: the session now uses another model.
+        ModelChanged = "modelChanged",
+        /// `session:<id>`: a terminal belongs to the session (M4).
+        TerminalOpened = "terminalOpened",
     }
 }
 

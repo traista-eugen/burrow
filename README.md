@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe and keeps events across restarts, and `burrowctl` talks to it. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. The real agents' adapters (ACP, MSP) are being built, so for now sessions run a scripted fake agent. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -40,6 +40,37 @@ And in a third, append an event; the tail prints it:
 ```powershell
 cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"session","id":"ses_1","title":"Hello"}'
 ```
+
+### Try a session with the fake agent
+
+With `--dev`, `burrowd` also offers `fake`: a scripted agent that runs as a real process and spends no quota. Start `burrowd --dev` as above, then:
+
+```powershell
+cargo run -p burrowctl -- agent list                  # the four real agents, and fake
+cargo run -p burrowctl -- session new --agent fake    # prints the session id: ses_…
+cargo run -p burrowctl -- session prompt ses_… "Hello there" --watch
+```
+
+The fake echoes your prompt, streaming it back word by word. Some prompts are scripted:
+
+| Prompt | What the fake does |
+|---|---|
+| `/permission` | Asks to edit a file, and waits for your answer in the inbox |
+| `/limit` | Hits a simulated usage limit; the session becomes `limited` for an hour |
+| `/slow` | Streams for 10 seconds, so you can try `session cancel` |
+| `/plan` | Shows a plan |
+
+Answer a permission request from another terminal:
+
+```powershell
+cargo run -p burrowctl -- session prompt ses_… /permission --watch   # terminal 1: waits
+cargo run -p burrowctl -- inbox list                                  # terminal 2
+cargo run -p burrowctl -- inbox respond inb_… allow                   # terminal 1 carries on
+```
+
+`session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents, which can't run sessions until their adapters land.
+
+### Notes
 
 - **Where things live:** `burrowd` keeps its database and logs in `%LOCALAPPDATA%\Burrow`; `--data-dir <dir>` puts them elsewhere.
 - **Logging:** set `BURROW_LOG=debug` for more detail.

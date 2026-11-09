@@ -20,6 +20,15 @@ pub enum ConnectError {
         /// The pipe's full path.
         pipe: String,
     },
+    /// The pipe's server doesn't run as the current user, so it isn't `burrowd`: another account
+    /// may have created a pipe with its name. Nothing was sent.
+    #[error("refusing to talk to {pipe}: {reason}")]
+    NotYours {
+        /// The pipe's full path.
+        pipe: String,
+        /// What the check found.
+        reason: String,
+    },
     /// Opening the pipe failed for another reason.
     #[error("can't connect to burrowd: {0}")]
     Io(#[from] io::Error),

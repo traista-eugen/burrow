@@ -105,6 +105,42 @@ method_table! {
         /// `debug/append`: development only. Appends an event to a stream; `burrowd` accepts it
         /// only when started with `--dev`.
         DebugAppend = "debug/append" (DebugAppendParams) -> DebugAppendResult;
+        /// `project/list`: every project.
+        ProjectList = "project/list" (Empty) -> Vec<Project>;
+        /// `project/add`: make a folder a project, detecting its git `origin` remote.
+        ProjectAdd = "project/add" (ProjectAddParams) -> Project;
+        /// `project/get`: one project.
+        ProjectGet = "project/get" (ProjectIdParams) -> Project;
+        /// `project/remove`: forget a project. Never deletes files. Returns `{}`.
+        ProjectRemove = "project/remove" (ProjectIdParams) -> Empty;
+        /// `agent/list`: the agents `burrowd` knows, as last detected.
+        AgentList = "agent/list" (Empty) -> Vec<AgentInfo>;
+        /// `agent/refresh`: detect the agents again, then list them.
+        AgentRefresh = "agent/refresh" (Empty) -> Vec<AgentInfo>;
+        /// `usage/get`: each provider's usage and limit, as last reported.
+        UsageGet = "usage/get" (Empty) -> Vec<ProviderUsage>;
+        /// `session/list`: sessions, newest first.
+        SessionList = "session/list" (SessionListParams) -> Vec<SessionSummary>;
+        /// `session/create`: start an agent session. Answers once the agent is ready.
+        SessionCreate = "session/create" (SessionCreateParams) -> Session;
+        /// `session/get`: one session.
+        SessionGet = "session/get" (SessionIdParams) -> Session;
+        /// `session/prompt`: start a turn. Its output arrives as events.
+        SessionPrompt = "session/prompt" (SessionPromptParams) -> SessionPromptResult;
+        /// `session/cancel`: stop the running turn; the session stays open. Returns `{}`.
+        SessionCancel = "session/cancel" (SessionIdParams) -> Empty;
+        /// `session/setModel`: switch the session's model. Returns `{}`.
+        SessionSetModel = "session/setModel" (SessionSetModelParams) -> Empty;
+        /// `session/stop`: end the agent process and everything it started. Returns `{}`.
+        SessionStop = "session/stop" (SessionIdParams) -> Empty;
+        /// `session/archive`: stop the session if needed and hide it from default lists.
+        SessionArchive = "session/archive" (SessionIdParams) -> Empty;
+        /// `inbox/list`: inbox items, newest first.
+        InboxList = "inbox/list" (InboxListParams) -> Vec<InboxItem>;
+        /// `inbox/get`: one inbox item.
+        InboxGet = "inbox/get" (InboxItemIdParams) -> InboxItem;
+        /// `inbox/respond`: answer an inbox item.
+        InboxRespond = "inbox/respond" (InboxRespondParams) -> InboxItem;
     }
     notifications {
         /// `$/cancel`: cancel one of the sender's own pending requests.

@@ -7,10 +7,11 @@
 //! - **Subscribing** reads the stream's head and registers the subscriber in one step, with no
 //!   append in between. Every event after that head reaches the subscriber live; everything up to
 //!   it is history, read with [`Hub::read`].
-//! - **Appending** commits, answers the caller, then hands each new event to the stream's
-//!   subscribers. The `events/event` line is encoded once and shared.
-//! - **Group commit.** Every commit costs an fsync (D-012). When several appends to the same
-//!   stream are already queued, the thread commits them as one transaction and splits the seqs.
+//! - **Committing** writes events to one or more streams, plus entity rows (D-017), in one
+//!   transaction, answers the caller, then hands each new event to its stream's subscribers. The
+//!   `events/event` line is encoded once and shared.
+//! - **Group commit.** Every commit costs an fsync (D-012). When several commits are already
+//!   queued, the thread writes them as one transaction and splits the seqs.
 //!
 //! The thread never waits on a subscriber. Each one has a bounded buffer; a subscriber whose
 //! buffer is full is dropped, which ends its connection (D-015).
@@ -19,8 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 
-use burrow_protocol::StreamName;
-use burrow_store::{Appended, Event as StoredEvent, NewEvent, Store};
+use burrow_protocol::{Event, StreamName};
+use burrow_store::{Append, Appended, Entity, EntityWrite, Event as StoredEvent, NewEvent, Store};
+use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -29,6 +31,79 @@ use crate::wire;
 
 /// The most events one group commit may hold.
 const MAX_BATCH_EVENTS: usize = 512;
+
+/// Events for one or more streams, plus entity rows, to write in one transaction (D-017).
+///
+/// Events for the same stream stay in the order added and get consecutive seqs. Entity rows are
+/// the current state of what the events change; write them only together with those events.
+#[derive(Debug, Default)]
+pub struct Commit {
+    appends: Vec<(StreamName, Vec<NewEvent>)>,
+    entities: Vec<EntityWrite>,
+}
+
+impl Commit {
+    /// An empty commit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `event` to `stream`.
+    pub fn event(&mut self, stream: &StreamName, event: impl Into<Event>) -> &mut Self {
+        self.record(stream, wire::record(&event.into()))
+    }
+
+    /// Adds an already encoded record to `stream`.
+    pub fn record(&mut self, stream: &StreamName, record: NewEvent) -> &mut Self {
+        match self.appends.iter_mut().find(|(name, _)| name == stream) {
+            Some((_, events)) => events.push(record),
+            None => self.appends.push((stream.clone(), vec![record])),
+        }
+        self
+    }
+
+    /// Writes an entity's current state.
+    pub fn put(&mut self, kind: &str, id: &str, body: &impl Serialize) -> &mut Self {
+        self.entities.push(
+            EntityWrite::put(kind, id, body).expect("protocol types always serialize to JSON"),
+        );
+        self
+    }
+
+    /// Removes an entity's row.
+    pub fn delete(&mut self, kind: &str, id: &str) -> &mut Self {
+        self.entities.push(EntityWrite::delete(kind, id));
+        self
+    }
+
+    /// Whether there is nothing to write.
+    pub fn is_empty(&self) -> bool {
+        self.appends.is_empty() && self.entities.is_empty()
+    }
+
+    fn event_count(&self) -> usize {
+        self.appends.iter().map(|(_, events)| events.len()).sum()
+    }
+}
+
+/// What a commit wrote: the seqs each stream's events got, in the order the streams were first
+/// added.
+#[derive(Clone, Debug)]
+pub struct Committed {
+    /// One entry per stream.
+    pub appended: Vec<(StreamName, Appended)>,
+}
+
+#[cfg(test)]
+impl Committed {
+    /// The seqs `stream`'s events got, if the commit had any.
+    pub fn seqs(&self, stream: &StreamName) -> Option<&Appended> {
+        self.appended
+            .iter()
+            .find(|(name, _)| name == stream)
+            .map(|(_, appended)| appended)
+    }
+}
 
 /// One event delivered live to a subscriber.
 #[derive(Clone, Debug)]
@@ -60,10 +135,13 @@ pub enum HubError {
 }
 
 enum Command {
-    Append {
-        stream: StreamName,
-        events: Vec<NewEvent>,
-        reply: oneshot::Sender<Result<Appended, HubError>>,
+    Commit {
+        commit: Commit,
+        reply: oneshot::Sender<Result<Committed, HubError>>,
+    },
+    Entities {
+        kind: String,
+        reply: oneshot::Sender<Result<Vec<Entity>, HubError>>,
     },
     Read {
         stream: StreamName,
@@ -91,9 +169,14 @@ pub struct Hub {
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Append { stream, events, .. } => {
-                write!(f, "Append({stream}, {} events)", events.len())
-            }
+            Self::Commit { commit, .. } => write!(
+                f,
+                "Commit({} streams, {} events, {} entities)",
+                commit.appends.len(),
+                commit.event_count(),
+                commit.entities.len()
+            ),
+            Self::Entities { kind, .. } => write!(f, "Entities({kind})"),
             Self::Read { stream, after, .. } => write!(f, "Read({stream}, after {after})"),
             Self::Subscribe { stream, .. } => write!(f, "Subscribe({stream})"),
             Self::Unsubscribe { stream, id } => write!(f, "Unsubscribe({stream}, {id})"),
@@ -120,12 +203,31 @@ impl Hub {
         events: Vec<NewEvent>,
     ) -> Result<Appended, HubError> {
         debug_assert!(!events.is_empty(), "an append needs at least one event");
-        self.ask(|reply| Command::Append {
-            stream,
-            events,
-            reply,
-        })
-        .await
+        let mut commit = Commit::new();
+        for event in events {
+            commit.record(&stream, event);
+        }
+        let committed = self.commit(commit).await?;
+        Ok(committed
+            .appended
+            .into_iter()
+            .next()
+            .map(|(_, appended)| appended)
+            .expect("one stream was appended"))
+    }
+
+    /// Writes `commit` in one transaction, then delivers its events to live subscribers.
+    ///
+    /// The commit must not be empty, and every stream name and event type must be non-empty.
+    pub async fn commit(&self, commit: Commit) -> Result<Committed, HubError> {
+        debug_assert!(!commit.is_empty(), "a commit needs something to write");
+        self.ask(|reply| Command::Commit { commit, reply }).await
+    }
+
+    /// Every entity row of `kind`, ordered by id.
+    pub async fn entities(&self, kind: &str) -> Result<Vec<Entity>, HubError> {
+        let kind = kind.to_owned();
+        self.ask(|reply| Command::Entities { kind, reply }).await
     }
 
     /// Up to `limit` events of `stream` after seq `after`, in order.
@@ -209,12 +311,12 @@ impl StoreThread {
                 },
             };
             match command {
-                Command::Append {
-                    stream,
-                    events,
-                    reply,
-                } => {
-                    next = self.append(&mut inbox, stream, events, reply);
+                Command::Commit { commit, reply } => {
+                    next = self.commit(&mut inbox, commit, reply);
+                }
+                Command::Entities { kind, reply } => {
+                    let result = self.store.entities(&kind);
+                    let _ = reply.send(result.map_err(|error| HubError::Store(Arc::new(error))));
                 }
                 Command::Read {
                     stream,
@@ -254,26 +356,22 @@ impl StoreThread {
         debug!("store thread stopped");
     }
 
-    /// Commits one append, plus any appends to the same stream already waiting behind it.
+    /// Writes one commit, plus any commits already waiting behind it, in one transaction.
     /// Returns the first queued command that couldn't join the batch.
-    fn append(
+    fn commit(
         &mut self,
         inbox: &mut mpsc::UnboundedReceiver<Command>,
-        stream: StreamName,
-        mut events: Vec<NewEvent>,
-        reply: oneshot::Sender<Result<Appended, HubError>>,
+        commit: Commit,
+        reply: oneshot::Sender<Result<Committed, HubError>>,
     ) -> Option<Command> {
-        let mut callers = vec![(events.len(), reply)];
+        let mut events = commit.event_count();
+        let mut batch = vec![(commit, reply)];
         let mut next = None;
-        while events.len() < MAX_BATCH_EVENTS {
+        while events < MAX_BATCH_EVENTS {
             match inbox.try_recv() {
-                Ok(Command::Append {
-                    stream: other,
-                    events: more,
-                    reply,
-                }) if other == stream => {
-                    callers.push((more.len(), reply));
-                    events.extend(more);
+                Ok(Command::Commit { commit, reply }) => {
+                    events += commit.event_count();
+                    batch.push((commit, reply));
                 }
                 Ok(command) => {
                     next = Some(command);
@@ -283,26 +381,44 @@ impl StoreThread {
             }
         }
 
-        match self.store.append(stream.as_str(), &events) {
-            Ok(appended) => {
-                if callers.len() > 1 {
-                    debug!(%stream, appends = callers.len(), events = events.len(), "group commit");
+        let appends: Vec<Append<'_>> = batch
+            .iter()
+            .flat_map(|(commit, _)| &commit.appends)
+            .map(|(stream, events)| Append {
+                stream: stream.as_str(),
+                events,
+            })
+            .collect();
+        let entities: Vec<EntityWrite> = batch
+            .iter()
+            .flat_map(|(commit, _)| commit.entities.iter().cloned())
+            .collect();
+
+        match self.store.commit(&appends, &entities) {
+            Ok(results) => {
+                if batch.len() > 1 {
+                    debug!(commits = batch.len(), events, "group commit");
                 }
-                let mut first = *appended.seqs.start();
-                for (count, reply) in callers {
-                    let count = count as u64;
-                    let _ = reply.send(Ok(Appended {
-                        seqs: first..=first + count - 1,
-                        at_ms: appended.at_ms,
-                    }));
-                    first += count;
+                let mut results = results.into_iter();
+                for (commit, reply) in batch {
+                    let appended: Vec<(StreamName, Appended)> = commit
+                        .appends
+                        .iter()
+                        .map(|(stream, _)| {
+                            let appended = results.next().expect("one result per append");
+                            (stream.clone(), appended)
+                        })
+                        .collect();
+                    for ((stream, events), (_, appended)) in commit.appends.iter().zip(&appended) {
+                        self.fan_out(stream, events, appended);
+                    }
+                    let _ = reply.send(Ok(Committed { appended }));
                 }
-                self.fan_out(&stream, &events, &appended);
             }
             Err(error) => {
-                error!(%stream, %error, "append failed");
+                error!(%error, "commit failed");
                 let error = Arc::new(error);
-                for (_, reply) in callers {
+                for (_, reply) in batch {
                     let _ = reply.send(Err(HubError::Store(error.clone())));
                 }
             }
@@ -422,6 +538,65 @@ mod tests {
         hub.unsubscribe(stream.clone(), registration.id);
         hub.append(stream, vec![event(4)]).await.unwrap();
         assert!(live.recv().await.is_none(), "unsubscribed");
+    }
+
+    #[tokio::test]
+    async fn a_commit_writes_several_streams_and_entities_and_fans_out() {
+        let hub = hub();
+        let session = StreamName::session("ses_1");
+        let (sender, mut live) = mpsc::channel(16);
+        hub.subscribe(session.clone(), sender).await.unwrap();
+
+        let mut commit = Commit::new();
+        commit
+            .record(&StreamName::index(), event(1))
+            .record(&session, event(2))
+            .record(&StreamName::index(), event(3))
+            .record(&session, event(4))
+            .put("session", "ses_1", &json!({"state": "idle"}));
+        let committed = hub.commit(commit).await.unwrap();
+        assert_eq!(committed.seqs(&StreamName::index()).unwrap().seqs, 1..=2);
+        assert_eq!(committed.seqs(&session).unwrap().seqs, 1..=2);
+
+        assert_eq!(live.recv().await.unwrap().seq, 1);
+        assert_eq!(live.recv().await.unwrap().seq, 2);
+        let rows = hub.entities("session").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body.get(), r#"{"state":"idle"}"#);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_commits_to_many_streams_stay_gap_free() {
+        let hub = hub();
+        let tasks: Vec<_> = (0..8)
+            .map(|task| {
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    for i in 0..20 {
+                        let mut commit = Commit::new();
+                        commit
+                            .record(&StreamName::index(), event(task * 100 + i))
+                            .record(&StreamName::session(&format!("ses_{task}")), event(i));
+                        hub.commit(commit).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let index = hub.read(StreamName::index(), 0, 1000).await.unwrap();
+        assert_eq!(
+            index.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            (1..=160).collect::<Vec<_>>()
+        );
+        for task in 0..8 {
+            let events = hub
+                .read(StreamName::session(&format!("ses_{task}")), 0, 100)
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 20);
+        }
     }
 
     #[tokio::test]

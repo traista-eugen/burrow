@@ -46,7 +46,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Starts `burrowd` and waits until it accepts clients.
+    /// Starts `burrowd` and waits until it accepts clients. With `dev`, it offers only the fake
+    /// agent; without, no agents. Either way no real agent CLI is run.
     pub async fn start(data_dir: &Path, pipe: &str, dev: bool) -> Self {
         let mut command = burrowd();
         command
@@ -55,7 +56,9 @@ impl Daemon {
             .arg("--data-dir")
             .arg(data_dir);
         if dev {
-            command.arg("--dev");
+            command.arg("--dev").arg("--agents=fake");
+        } else {
+            command.arg("--agents=");
         }
         let mut daemon = Self {
             child: command.spawn().expect("start burrowd"),
@@ -79,6 +82,11 @@ impl Daemon {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// The `burrowd` process id.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Kills `burrowd` the hard way (TerminateProcess): no shutdown code runs.

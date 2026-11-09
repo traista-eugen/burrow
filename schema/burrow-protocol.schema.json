@@ -1,5 +1,218 @@
 {
   "$defs": {
+    "AgentId": {
+      "description": "Which agent: the four Burrow drives, plus a scripted fake for tests.",
+      "oneOf": [
+        {
+          "const": "claude",
+          "description": "Claude Code, through ACP."
+        },
+        {
+          "const": "codex",
+          "description": "Codex, through ACP."
+        },
+        {
+          "const": "cursor",
+          "description": "The Cursor CLI (`agent`), through ACP."
+        },
+        {
+          "const": "muse",
+          "description": "Muse Code, through MSP."
+        },
+        {
+          "const": "fake",
+          "description": "A scripted fake agent for tests and trying things by hand. Listed only when `burrowd` runs with `--dev`."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "claude",
+              "codex",
+              "cursor",
+              "muse",
+              "fake"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "AgentInfo": {
+      "description": "What `burrowd` found out about one agent.",
+      "properties": {
+        "available": {
+          "description": "Whether `session/create` can start this agent now.",
+          "type": "boolean"
+        },
+        "detectedAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When this was detected."
+        },
+        "id": {
+          "$ref": "#/$defs/AgentId",
+          "description": "Which agent."
+        },
+        "installed": {
+          "description": "Whether its CLI was found.",
+          "type": "boolean"
+        },
+        "integration": {
+          "$ref": "#/$defs/Integration",
+          "description": "How Burrow talks to it."
+        },
+        "login": {
+          "$ref": "#/$defs/AgentLogin",
+          "description": "Whether the CLI is logged in."
+        },
+        "models": {
+          "description": "Models the agent offers, when they are cheap to find out. Empty when unknown.",
+          "items": {
+            "$ref": "#/$defs/ModelInfo"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Its display name, for example `Claude Code`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The CLI's absolute path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "problem": {
+          "description": "Why it isn't available, or what looks wrong. Human-readable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The CLI's version, as it reports it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "integration",
+        "installed",
+        "login",
+        "available",
+        "detectedAt"
+      ],
+      "type": "object"
+    },
+    "AgentLogin": {
+      "description": "An agent CLI's login state.",
+      "properties": {
+        "account": {
+          "description": "The account, when the CLI reports it, for example an email address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "More detail, as the CLI reports it, for example the plan or \"no subscription allowance\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/LoginState",
+          "description": "Logged in, logged out, or unknown."
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "AgentMessageChunk": {
+      "description": "`agentMessageChunk`: a piece of the agent's answer. Stored in chunks of about 100 ms; a client appends consecutive chunks of a turn.",
+      "properties": {
+        "text": {
+          "description": "The text, usually Markdown, to append to the answer so far.",
+          "type": "string"
+        },
+        "turnId": {
+          "description": "The turn.",
+          "type": "string"
+        },
+        "type": {
+          "const": "agentMessageChunk"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "text"
+      ],
+      "type": "object"
+    },
+    "AgentThoughtChunk": {
+      "description": "`agentThoughtChunk`: a piece of the agent's visible reasoning.",
+      "properties": {
+        "text": {
+          "description": "The text to append.",
+          "type": "string"
+        },
+        "turnId": {
+          "description": "The turn.",
+          "type": "string"
+        },
+        "type": {
+          "const": "agentThoughtChunk"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "description": "An immutable file in the artifact store, addressed by its SHA-256 hash.",
+      "properties": {
+        "hash": {
+          "description": "`sha256:` followed by the content's hash in lowercase hex.",
+          "type": "string"
+        },
+        "mediaType": {
+          "description": "The media type, for example `image/png`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "A display name, for example `plan.md`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "The size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hash",
+        "mediaType",
+        "size"
+      ],
+      "type": "object"
+    },
     "CancelParams": {
       "description": "`$/cancel` params: which of the sender's own pending requests to cancel. The receiver should stop and answer that request with the error `cancelled`.",
       "properties": {
@@ -77,6 +290,84 @@
           "const": "step",
           "description": "A custom step process, in RPC mode (the step protocol).",
           "type": "string"
+        }
+      ]
+    },
+    "CodeHost": {
+      "description": "A code host Burrow knows how to work with.",
+      "oneOf": [
+        {
+          "const": "github",
+          "description": "github.com."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "github"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "ContentBlock": {
+      "description": "A piece of prompt or message content. Follows ACP, except that images are artifact references instead of inline data.",
+      "oneOf": [
+        {
+          "description": "Text, usually Markdown.",
+          "properties": {
+            "text": {
+              "description": "The text.",
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An image from the artifact store. Defined, but `session/prompt` doesn't accept it yet.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "The image."
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "artifact"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A resource, such as a file, by URI. Defined, but `session/prompt` doesn't accept it yet.",
+          "properties": {
+            "type": {
+              "const": "resource",
+              "type": "string"
+            },
+            "uri": {
+              "description": "The resource's URI, for example `file:///D:/repo/README.md`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "uri"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -411,6 +702,48 @@
           "$ref": "#/$defs/InboxItemResolved"
         },
         {
+          "$ref": "#/$defs/UserMessage"
+        },
+        {
+          "$ref": "#/$defs/AgentMessageChunk"
+        },
+        {
+          "$ref": "#/$defs/AgentThoughtChunk"
+        },
+        {
+          "$ref": "#/$defs/ToolCall"
+        },
+        {
+          "$ref": "#/$defs/ToolCallUpdate"
+        },
+        {
+          "$ref": "#/$defs/Plan"
+        },
+        {
+          "$ref": "#/$defs/PermissionRequested"
+        },
+        {
+          "$ref": "#/$defs/PermissionResolved"
+        },
+        {
+          "$ref": "#/$defs/TurnEnded"
+        },
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "$ref": "#/$defs/LimitReached"
+        },
+        {
+          "$ref": "#/$defs/StateChanged"
+        },
+        {
+          "$ref": "#/$defs/ModelChanged"
+        },
+        {
+          "$ref": "#/$defs/TerminalOpened"
+        },
+        {
           "$ref": "#/$defs/UnknownEvent"
         }
       ],
@@ -421,6 +754,146 @@
       },
       "required": [
         "type"
+      ],
+      "type": "object"
+    },
+    "InboxAction": {
+      "description": "One possible answer to an inbox item.",
+      "properties": {
+        "id": {
+          "description": "The action's id, sent as `action` in `inbox/respond`.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Its label, for example `Allow once`.",
+          "type": "string"
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxActionStyle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How to draw it."
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "InboxActionStyle": {
+      "description": "How to draw an inbox action.",
+      "oneOf": [
+        {
+          "const": "primary",
+          "description": "The suggested answer.",
+          "type": "string"
+        },
+        {
+          "const": "danger",
+          "description": "An answer that refuses or destroys something.",
+          "type": "string"
+        }
+      ]
+    },
+    "InboxItem": {
+      "description": "Something that waits on a human.",
+      "properties": {
+        "actions": {
+          "description": "The possible answers. For a permission request, the agent's options.",
+          "items": {
+            "$ref": "#/$defs/InboxAction"
+          },
+          "type": "array"
+        },
+        "attachments": {
+          "description": "Files to look at before answering.",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "body": {
+          "description": "More detail, in Markdown.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When it was resolved or expired."
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When it was created."
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When it expires on its own, if it does."
+        },
+        "form": {
+          "description": "A JSON Schema for a structured answer, sent as `payload`, for example a feedback field."
+        },
+        "id": {
+          "description": "The item's id (`inb_…`).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/InboxItemKind",
+          "description": "What it asks for."
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxResolution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The answer, once resolved."
+        },
+        "source": {
+          "$ref": "#/$defs/InboxSource",
+          "default": {},
+          "description": "Where it comes from."
+        },
+        "status": {
+          "$ref": "#/$defs/InboxItemStatus",
+          "description": "Open, resolved or expired."
+        },
+        "title": {
+          "description": "A one-line summary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "actions",
+        "status",
+        "createdAt"
       ],
       "type": "object"
     },
@@ -453,6 +926,19 @@
         "itemId",
         "kind",
         "title"
+      ],
+      "type": "object"
+    },
+    "InboxItemIdParams": {
+      "description": "Params naming one inbox item.",
+      "properties": {
+        "itemId": {
+          "description": "The item's id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId"
       ],
       "type": "object"
     },
@@ -561,6 +1047,86 @@
         }
       ]
     },
+    "InboxListParams": {
+      "description": "`inbox/list` params.",
+      "properties": {
+        "before": {
+          "description": "Only items created before this one: pass the last id of the previous page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "At most this many. Default 100, at most 1000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxItemStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only items with this status. All of them when absent."
+        }
+      },
+      "type": "object"
+    },
+    "InboxResolution": {
+      "description": "How an inbox item was answered.",
+      "properties": {
+        "action": {
+          "description": "The action chosen.",
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When."
+        },
+        "by": {
+          "description": "Who answered: a device id, or `local`.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The structured answer, if the item has a `form`."
+        }
+      },
+      "required": [
+        "action",
+        "by",
+        "at"
+      ],
+      "type": "object"
+    },
+    "InboxRespondParams": {
+      "description": "`inbox/respond` params.",
+      "properties": {
+        "action": {
+          "description": "One of the item's action ids.",
+          "type": "string"
+        },
+        "itemId": {
+          "description": "The item.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The structured answer, if the item has a `form`."
+        }
+      },
+      "required": [
+        "itemId",
+        "action"
+      ],
+      "type": "object"
+    },
     "InboxSource": {
       "description": "Where an inbox item comes from. Every member is optional.",
       "properties": {
@@ -580,6 +1146,13 @@
         },
         "stepPath": {
           "description": "The step that asked, within `runId`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCallId": {
+          "description": "The tool call a permission request is about, within `sessionId`.",
           "type": [
             "string",
             "null"
@@ -649,6 +1222,131 @@
       ],
       "type": "object"
     },
+    "Integration": {
+      "description": "How Burrow talks to an agent.",
+      "oneOf": [
+        {
+          "const": "acp",
+          "description": "The Agent Client Protocol."
+        },
+        {
+          "const": "msp",
+          "description": "Muse's own protocol, through `muse serve`."
+        },
+        {
+          "const": "terminal",
+          "description": "The agent's own TUI in a pseudo-terminal."
+        },
+        {
+          "const": "fake",
+          "description": "The fake agent's own trivial protocol."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "acp",
+              "msp",
+              "terminal",
+              "fake"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "LimitInfo": {
+      "description": "A provider limit that was hit.",
+      "properties": {
+        "message": {
+          "description": "The provider's message.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider whose limit it is, for example `claude`.",
+          "type": "string"
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When it resets, if known."
+        }
+      },
+      "required": [
+        "provider",
+        "message"
+      ],
+      "type": "object"
+    },
+    "LimitReached": {
+      "description": "`limitReached`: a provider limit was hit. The session becomes `limited`.",
+      "properties": {
+        "message": {
+          "description": "The provider's message.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider, for example `claude`.",
+          "type": "string"
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the limit resets, if known."
+        },
+        "type": {
+          "const": "limitReached"
+        }
+      },
+      "required": [
+        "type",
+        "provider",
+        "message"
+      ],
+      "type": "object"
+    },
+    "LoginState": {
+      "description": "Whether the agent's CLI is logged in.",
+      "oneOf": [
+        {
+          "const": "loggedIn",
+          "description": "Logged in; sessions can use the account."
+        },
+        {
+          "const": "loggedOut",
+          "description": "Not logged in. Log in with the agent's own CLI."
+        },
+        {
+          "const": "unknown",
+          "description": "Burrow couldn't tell."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "loggedIn",
+              "loggedOut",
+              "unknown"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
     "Message": {
       "description": "Any one JSON-RPC 2.0 message: one line on the named pipe or stdin/stdout, or one WebSocket text frame.",
       "oneOf": [
@@ -662,6 +1360,43 @@
           "$ref": "#/$defs/Notification"
         }
       ]
+    },
+    "ModelChanged": {
+      "description": "`modelChanged`: the session now uses another model.",
+      "properties": {
+        "model": {
+          "description": "The model's id.",
+          "type": "string"
+        },
+        "type": {
+          "const": "modelChanged"
+        }
+      },
+      "required": [
+        "type",
+        "model"
+      ],
+      "type": "object"
+    },
+    "ModelInfo": {
+      "description": "A model an agent offers.",
+      "properties": {
+        "id": {
+          "description": "The id to pass as `model`, for example `gpt-5.3-codex`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "A display name, for example `Codex 5.3`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
     },
     "Notification": {
       "description": "A one-way message. It gets no response.",
@@ -687,6 +1422,438 @@
       "required": [
         "jsonrpc",
         "method"
+      ],
+      "type": "object"
+    },
+    "PermissionOption": {
+      "description": "One answer the agent offers to a permission request.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PermissionOptionKind",
+          "description": "What it does."
+        },
+        "name": {
+          "description": "Its label, for example `Allow once`.",
+          "type": "string"
+        },
+        "optionId": {
+          "description": "The option's id. It is also the inbox item's action id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "optionId",
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PermissionOptionKind": {
+      "description": "What a permission option does. Mirrors ACP's option kinds.",
+      "oneOf": [
+        {
+          "const": "allowOnce",
+          "description": "Allow this once."
+        },
+        {
+          "const": "allowAlways",
+          "description": "Allow this and similar calls from now on."
+        },
+        {
+          "const": "rejectOnce",
+          "description": "Refuse this once."
+        },
+        {
+          "const": "rejectAlways",
+          "description": "Refuse this and similar calls from now on."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "allowOnce",
+              "allowAlways",
+              "rejectOnce",
+              "rejectAlways"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "PermissionRequested": {
+      "description": "`permissionRequested`: the agent asks before a tool call. The question is inbox item `inboxItemId`, answered with `inbox/respond`; the session is `waiting` until then.",
+      "properties": {
+        "inboxItemId": {
+          "description": "The inbox item that holds the question.",
+          "type": "string"
+        },
+        "options": {
+          "description": "The answers the agent offers.",
+          "items": {
+            "$ref": "#/$defs/PermissionOption"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "What the agent wants to do, for example `Edit README.md`.",
+          "type": "string"
+        },
+        "toolCallId": {
+          "description": "The tool call it is about.",
+          "type": "string"
+        },
+        "turnId": {
+          "description": "The turn it belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "permissionRequested"
+        }
+      },
+      "required": [
+        "type",
+        "inboxItemId",
+        "toolCallId",
+        "title",
+        "options"
+      ],
+      "type": "object"
+    },
+    "PermissionResolved": {
+      "description": "`permissionResolved`: a permission request was answered, or expired because the turn was cancelled, the session stopped or `burrowd` restarted.",
+      "properties": {
+        "by": {
+          "description": "Who answered: a device id, or `local`. Absent when it expired.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inboxItemId": {
+          "description": "The inbox item.",
+          "type": "string"
+        },
+        "optionId": {
+          "description": "The option chosen. Absent when it expired.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/InboxItemStatus",
+          "description": "`resolved` or `expired`."
+        },
+        "toolCallId": {
+          "description": "The tool call it was about.",
+          "type": "string"
+        },
+        "type": {
+          "const": "permissionResolved"
+        }
+      },
+      "required": [
+        "type",
+        "inboxItemId",
+        "toolCallId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Plan": {
+      "description": "`plan`: the agent's current plan, replacing any earlier one.",
+      "properties": {
+        "entries": {
+          "description": "Every entry, in order.",
+          "items": {
+            "$ref": "#/$defs/PlanEntry"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "plan"
+        }
+      },
+      "required": [
+        "type",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "PlanEntry": {
+      "description": "One step of an agent's plan.",
+      "properties": {
+        "content": {
+          "description": "What the step is.",
+          "type": "string"
+        },
+        "priority": {
+          "$ref": "#/$defs/PlanEntryPriority",
+          "description": "Its priority."
+        },
+        "status": {
+          "$ref": "#/$defs/PlanEntryStatus",
+          "description": "Its progress."
+        }
+      },
+      "required": [
+        "content",
+        "status",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "PlanEntryPriority": {
+      "description": "A plan entry's priority.",
+      "oneOf": [
+        {
+          "const": "high",
+          "description": "High."
+        },
+        {
+          "const": "medium",
+          "description": "Medium."
+        },
+        {
+          "const": "low",
+          "description": "Low."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "PlanEntryStatus": {
+      "description": "A plan entry's progress.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Not started."
+        },
+        {
+          "const": "inProgress",
+          "description": "Being worked on."
+        },
+        {
+          "const": "completed",
+          "description": "Done."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "pending",
+              "inProgress",
+              "completed"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "Project": {
+      "description": "A local folder Burrow works in, usually a git repository.",
+      "properties": {
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the project was added."
+        },
+        "id": {
+          "description": "The project's id (`prj_…`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name: the folder's name.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The folder's absolute path.",
+          "type": "string"
+        },
+        "remote": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectRemote"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The git `origin` remote, when the folder is a git repository that has one."
+        },
+        "settings": {
+          "$ref": "#/$defs/ProjectSettings",
+          "default": {},
+          "description": "The project's settings."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectAddParams": {
+      "description": "`project/add` params.",
+      "properties": {
+        "path": {
+          "description": "The folder, as an absolute path. Adding a folder that is already a project returns that project.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "ProjectIdParams": {
+      "description": "Params naming one project.",
+      "properties": {
+        "projectId": {
+          "description": "The project's id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "ProjectRemote": {
+      "description": "A project's git `origin` remote.",
+      "properties": {
+        "host": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeHost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The code host, when Burrow recognises it. Absent for other hosts."
+        },
+        "owner": {
+          "description": "The repository's owner on the code host, for example `traista-eugen`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "The repository's name on the code host, for example `burrow`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "The remote's URL, as git reports it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "description": "A project's settings. Empty for now: role overrides, the check command, `autoMerge` and default flows arrive with the features that use them. Unknown members are ignored.",
+      "type": "object"
+    },
+    "ProviderUsage": {
+      "description": "One provider's usage and limit, as last reported. Every figure is optional: providers report different things.",
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The agent that reported it."
+        },
+        "limit": {
+          "description": "The allowance, in `unit`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "limited": {
+          "description": "Whether the provider's limit has been reached.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "The provider's own words, for example the message that came with a limit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "The provider, for example `claude`. By default the id of the agent that reported it.",
+          "type": "string"
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the limit resets, if known."
+        },
+        "source": {
+          "$ref": "#/$defs/UsageSource",
+          "description": "Reported or estimated."
+        },
+        "unit": {
+          "description": "The unit of `used` and `limit`, for example `tokens`, `requests`, `usd` or `percent`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When this was last updated."
+        },
+        "used": {
+          "description": "How much of the allowance is used, in `unit`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "source",
+        "updatedAt"
       ],
       "type": "object"
     },
@@ -808,6 +1975,448 @@
       ],
       "type": "object"
     },
+    "Session": {
+      "description": "One conversation with one agent.",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentId",
+          "description": "The agent."
+        },
+        "archived": {
+          "description": "Archived sessions leave the default lists.",
+          "type": "boolean"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the session was created."
+        },
+        "cwd": {
+          "description": "The folder the agent works in.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The session's id (`ses_…`).",
+          "type": "string"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LimitInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The limit that was hit, while `limited`."
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode",
+          "description": "Structured or terminal."
+        },
+        "model": {
+          "description": "The model, when chosen or reported by the agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "description": "Models the agent offers in this session, when it says.",
+          "items": {
+            "$ref": "#/$defs/ModelInfo"
+          },
+          "type": "array"
+        },
+        "projectId": {
+          "description": "The project it belongs to, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why the session stopped or failed. Human-readable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionState",
+          "description": "The current state."
+        },
+        "title": {
+          "description": "The display name. Set from the first prompt when `session/create` didn't give one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "description": "The running turn, while `working` or `waiting`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When its state, title, model or usage last changed."
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tokens and cost so far, when the agent reports them."
+        }
+      },
+      "required": [
+        "id",
+        "agent",
+        "mode",
+        "cwd",
+        "state",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionCreateParams": {
+      "description": "`session/create` params.",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentId",
+          "description": "The agent to start."
+        },
+        "cwd": {
+          "description": "The folder the agent works in, as an absolute path. Required without `projectId`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode",
+          "default": "structured",
+          "description": "Structured (the default) or terminal. Terminal sessions are `unavailable` until M4."
+        },
+        "model": {
+          "description": "The model to use; the agent's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "description": "The project to work in. Its folder is the default `cwd`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The display name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "type": "object"
+    },
+    "SessionIdParams": {
+      "description": "Params naming one session.",
+      "properties": {
+        "sessionId": {
+          "description": "The session's id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "SessionListParams": {
+      "description": "`session/list` params. Every filter is optional.",
+      "properties": {
+        "before": {
+          "description": "Only sessions created before this one: pass the last id of the previous page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "includeArchived": {
+          "description": "Include archived sessions, which are left out by default.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "At most this many. Default 100, at most 1000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "description": "Only sessions of this project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only sessions in this state."
+        }
+      },
+      "type": "object"
+    },
+    "SessionMode": {
+      "description": "Whether a session is structured or runs the agent's own TUI.",
+      "oneOf": [
+        {
+          "const": "structured",
+          "description": "Through ACP or MSP: Burrow sees messages, tool calls and permission requests.",
+          "type": "string"
+        },
+        {
+          "const": "terminal",
+          "description": "The agent's own TUI in a pseudo-terminal. Not available until M4.",
+          "type": "string"
+        }
+      ]
+    },
+    "SessionPromptParams": {
+      "description": "`session/prompt` params.",
+      "properties": {
+        "content": {
+          "description": "The prompt. Only text blocks are accepted for now.",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          },
+          "type": "array"
+        },
+        "sessionId": {
+          "description": "The session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "content"
+      ],
+      "type": "object"
+    },
+    "SessionPromptResult": {
+      "description": "`session/prompt` result. The turn's output arrives as events on the session's stream.",
+      "properties": {
+        "turnId": {
+          "description": "The new turn's id (`trn_…`). Its events carry it, and `turnEnded` closes it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "SessionSetModelParams": {
+      "description": "`session/setModel` params.",
+      "properties": {
+        "model": {
+          "description": "The model's id, as the agent knows it.",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "The session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "model"
+      ],
+      "type": "object"
+    },
+    "SessionState": {
+      "description": "Where a session is in its life.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "The agent process is starting."
+        },
+        {
+          "const": "idle",
+          "description": "Ready for a prompt."
+        },
+        {
+          "const": "working",
+          "description": "A turn is running."
+        },
+        {
+          "const": "waiting",
+          "description": "A turn waits on a human: an inbox item is open."
+        },
+        {
+          "const": "limited",
+          "description": "A provider limit was hit. `Session.limit` says when it resets, if known."
+        },
+        {
+          "const": "stopped",
+          "description": "The agent process was stopped: by `session/stop`, or because `burrowd` stopped."
+        },
+        {
+          "const": "failed",
+          "description": "The agent couldn't start, or exited unexpectedly. `Session.reason` says why."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "starting",
+              "idle",
+              "working",
+              "waiting",
+              "limited",
+              "stopped",
+              "failed"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "SessionSummary": {
+      "description": "A session in a list: enough for a sidebar entry. `session/get` has the rest.",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentId",
+          "description": "The agent."
+        },
+        "archived": {
+          "description": "Whether it is archived.",
+          "type": "boolean"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the session was created."
+        },
+        "id": {
+          "description": "The session's id.",
+          "type": "string"
+        },
+        "model": {
+          "description": "The model, if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "description": "The project it belongs to, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionState",
+          "description": "The current state."
+        },
+        "title": {
+          "description": "The display name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When it last changed."
+        }
+      },
+      "required": [
+        "id",
+        "agent",
+        "state",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionUsage": {
+      "description": "A session's totals so far.",
+      "properties": {
+        "costUsd": {
+          "description": "Cost in US dollars, when the agent reports it.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputTokens": {
+          "description": "Input tokens, summed over every `usage` event.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "description": "Output tokens, summed over every `usage` event.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens"
+      ],
+      "type": "object"
+    },
+    "StateChanged": {
+      "description": "`stateChanged`: the session moved to a new state.",
+      "properties": {
+        "reason": {
+          "description": "Why, when it isn't obvious: for example why it stopped or failed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionState",
+          "description": "The new state."
+        },
+        "type": {
+          "const": "stateChanged"
+        }
+      },
+      "required": [
+        "type",
+        "state"
+      ],
+      "type": "object"
+    },
     "StreamEvent": {
       "description": "`events/event` params: one event from a subscribed stream.",
       "properties": {
@@ -888,11 +2497,399 @@
       ],
       "type": "object"
     },
+    "TerminalOpened": {
+      "description": "`terminalOpened`: a terminal belongs to this session (M4).",
+      "properties": {
+        "terminalId": {
+          "description": "The terminal's id, for `terminal/attach`.",
+          "type": "string"
+        },
+        "type": {
+          "const": "terminalOpened"
+        }
+      },
+      "required": [
+        "type",
+        "terminalId"
+      ],
+      "type": "object"
+    },
     "Timestamp": {
       "description": "An instant in UTC: RFC 3339 with exactly three fractional digits and `Z`, for example `2026-11-06T14:03:22.418Z`.",
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
       "type": "string"
+    },
+    "ToolCall": {
+      "description": "`toolCall`: the agent started, or asks to start, a tool call.",
+      "properties": {
+        "content": {
+          "description": "What it produced or proposes so far.",
+          "items": {
+            "$ref": "#/$defs/ToolCallContent"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ToolKind",
+          "description": "What it does."
+        },
+        "locations": {
+          "description": "Files it touches.",
+          "items": {
+            "$ref": "#/$defs/ToolCallLocation"
+          },
+          "type": "array"
+        },
+        "rawInput": {
+          "description": "The tool's raw input, as the agent sent it, for display."
+        },
+        "status": {
+          "$ref": "#/$defs/ToolCallStatus",
+          "description": "How far it has got."
+        },
+        "title": {
+          "description": "A one-line description, for example `Edit README.md`.",
+          "type": "string"
+        },
+        "toolCallId": {
+          "description": "The tool call's id, unique within the session. `toolCallUpdate` refers to it.",
+          "type": "string"
+        },
+        "turnId": {
+          "description": "The turn it belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "toolCall"
+        }
+      },
+      "required": [
+        "type",
+        "toolCallId",
+        "title",
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ToolCallContent": {
+      "description": "What a tool call produced or proposes. Mirrors ACP's tool call content.",
+      "oneOf": [
+        {
+          "description": "Ordinary content, such as text output.",
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/ContentBlock",
+              "description": "The content."
+            },
+            "type": {
+              "const": "content",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A change to a file.",
+          "properties": {
+            "newText": {
+              "description": "The text after the change.",
+              "type": "string"
+            },
+            "oldText": {
+              "description": "The text before the change; absent for a new file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file's absolute path.",
+              "type": "string"
+            },
+            "type": {
+              "const": "diff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "newText"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A terminal the tool runs in (M4).",
+          "properties": {
+            "terminalId": {
+              "description": "The terminal's id.",
+              "type": "string"
+            },
+            "type": {
+              "const": "terminal",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "terminalId"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolCallLocation": {
+      "description": "A file a tool call touches.",
+      "properties": {
+        "line": {
+          "description": "A 1-based line, if relevant.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file's absolute path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "ToolCallStatus": {
+      "description": "How far a tool call has got. Mirrors ACP's statuses.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Not started, for example waiting for permission."
+        },
+        {
+          "const": "inProgress",
+          "description": "Running."
+        },
+        {
+          "const": "completed",
+          "description": "Finished."
+        },
+        {
+          "const": "failed",
+          "description": "Failed or was refused."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "pending",
+              "inProgress",
+              "completed",
+              "failed"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "ToolCallUpdate": {
+      "description": "`toolCallUpdate`: a tool call changed. Absent fields are unchanged; present lists replace the old ones.",
+      "properties": {
+        "content": {
+          "description": "The new content, replacing the old: text, a diff or a terminal reference.",
+          "items": {
+            "$ref": "#/$defs/ToolCallContent"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The new kind."
+        },
+        "locations": {
+          "description": "The new locations, replacing the old ones.",
+          "items": {
+            "$ref": "#/$defs/ToolCallLocation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCallStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The new status."
+        },
+        "title": {
+          "description": "The new title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCallId": {
+          "description": "The tool call.",
+          "type": "string"
+        },
+        "type": {
+          "const": "toolCallUpdate"
+        }
+      },
+      "required": [
+        "type",
+        "toolCallId"
+      ],
+      "type": "object"
+    },
+    "ToolKind": {
+      "description": "What a tool call does, so a client can pick an icon. Mirrors ACP's tool kinds.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Reads files or data."
+        },
+        {
+          "const": "edit",
+          "description": "Changes files."
+        },
+        {
+          "const": "delete",
+          "description": "Deletes files."
+        },
+        {
+          "const": "move",
+          "description": "Moves or renames files."
+        },
+        {
+          "const": "search",
+          "description": "Searches."
+        },
+        {
+          "const": "execute",
+          "description": "Runs a command."
+        },
+        {
+          "const": "think",
+          "description": "Thinks."
+        },
+        {
+          "const": "fetch",
+          "description": "Fetches from the network."
+        },
+        {
+          "const": "other",
+          "description": "Anything else. (Named `Misc` in Rust because `Other` holds unknown values.)"
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "read",
+              "edit",
+              "delete",
+              "move",
+              "search",
+              "execute",
+              "think",
+              "fetch",
+              "other"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "TurnEndReason": {
+      "description": "Why a turn ended.",
+      "oneOf": [
+        {
+          "const": "completed",
+          "description": "The agent finished."
+        },
+        {
+          "const": "cancelled",
+          "description": "`session/cancel`, or the session was stopped."
+        },
+        {
+          "const": "limit",
+          "description": "A provider limit was hit; see `limitReached`."
+        },
+        {
+          "const": "error",
+          "description": "Something went wrong; `message` says what."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "completed",
+              "cancelled",
+              "limit",
+              "error"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "TurnEnded": {
+      "description": "`turnEnded`: a turn is over; the session is `idle` again, or `limited`.",
+      "properties": {
+        "message": {
+          "description": "More detail, for example the error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/TurnEndReason",
+          "description": "Why it ended."
+        },
+        "turnId": {
+          "description": "The turn.",
+          "type": "string"
+        },
+        "type": {
+          "const": "turnEnded"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "reason"
+      ],
+      "type": "object"
     },
     "UnknownEvent": {
       "description": "An event type added by a newer protocol revision. Show it as an unsupported event and keep going; never fail on it.",
@@ -905,7 +2902,21 @@
               "entityStateChanged",
               "entityRemoved",
               "inboxItemAdded",
-              "inboxItemResolved"
+              "inboxItemResolved",
+              "userMessage",
+              "agentMessageChunk",
+              "agentThoughtChunk",
+              "toolCall",
+              "toolCallUpdate",
+              "plan",
+              "permissionRequested",
+              "permissionResolved",
+              "turnEnded",
+              "usage",
+              "limitReached",
+              "stateChanged",
+              "modelChanged",
+              "terminalOpened"
             ]
           },
           "type": "string"
@@ -928,6 +2939,87 @@
         "stream"
       ],
       "type": "object"
+    },
+    "Usage": {
+      "description": "`usage`: tokens and cost of one turn, as the agent reports them. `Session.usage` holds the totals.",
+      "properties": {
+        "costUsd": {
+          "description": "Cost in US dollars, when known.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputTokens": {
+          "description": "Input tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "description": "Output tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "description": "The turn.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "usage"
+        }
+      },
+      "required": [
+        "type",
+        "inputTokens",
+        "outputTokens"
+      ],
+      "type": "object"
+    },
+    "UsageSource": {
+      "description": "Where a usage figure comes from.",
+      "oneOf": [
+        {
+          "const": "reported",
+          "description": "The agent or provider reported it.",
+          "type": "string"
+        },
+        {
+          "const": "estimated",
+          "description": "Burrow estimated it.",
+          "type": "string"
+        }
+      ]
+    },
+    "UserMessage": {
+      "description": "`userMessage`: the prompt that started a turn.",
+      "properties": {
+        "content": {
+          "description": "The prompt.",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          },
+          "type": "array"
+        },
+        "turnId": {
+          "description": "The turn it started.",
+          "type": "string"
+        },
+        "type": {
+          "const": "userMessage"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "content"
+      ],
+      "type": "object"
     }
   },
   "$ref": "#/$defs/Message",
@@ -941,6 +3033,28 @@
       },
       "result": {
         "$ref": "#/$defs/Empty"
+      }
+    },
+    "agent/list": {
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/AgentInfo"
+        },
+        "type": "array"
+      }
+    },
+    "agent/refresh": {
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/AgentInfo"
+        },
+        "type": "array"
       }
     },
     "debug/append": {
@@ -967,12 +3081,152 @@
         "$ref": "#/$defs/Empty"
       }
     },
+    "inbox/get": {
+      "params": {
+        "$ref": "#/$defs/InboxItemIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InboxItem"
+      }
+    },
+    "inbox/list": {
+      "params": {
+        "$ref": "#/$defs/InboxListParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/InboxItem"
+        },
+        "type": "array"
+      }
+    },
+    "inbox/respond": {
+      "params": {
+        "$ref": "#/$defs/InboxRespondParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InboxItem"
+      }
+    },
     "initialize": {
       "params": {
         "$ref": "#/$defs/InitializeParams"
       },
       "result": {
         "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "project/add": {
+      "params": {
+        "$ref": "#/$defs/ProjectAddParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Project"
+      }
+    },
+    "project/get": {
+      "params": {
+        "$ref": "#/$defs/ProjectIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Project"
+      }
+    },
+    "project/list": {
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/Project"
+        },
+        "type": "array"
+      }
+    },
+    "project/remove": {
+      "params": {
+        "$ref": "#/$defs/ProjectIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/archive": {
+      "params": {
+        "$ref": "#/$defs/SessionIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/cancel": {
+      "params": {
+        "$ref": "#/$defs/SessionIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/create": {
+      "params": {
+        "$ref": "#/$defs/SessionCreateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Session"
+      }
+    },
+    "session/get": {
+      "params": {
+        "$ref": "#/$defs/SessionIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Session"
+      }
+    },
+    "session/list": {
+      "params": {
+        "$ref": "#/$defs/SessionListParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/SessionSummary"
+        },
+        "type": "array"
+      }
+    },
+    "session/prompt": {
+      "params": {
+        "$ref": "#/$defs/SessionPromptParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionPromptResult"
+      }
+    },
+    "session/setModel": {
+      "params": {
+        "$ref": "#/$defs/SessionSetModelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/stop": {
+      "params": {
+        "$ref": "#/$defs/SessionIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "usage/get": {
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ProviderUsage"
+        },
+        "type": "array"
       }
     }
   },

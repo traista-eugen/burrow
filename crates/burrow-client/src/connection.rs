@@ -35,12 +35,15 @@ use crate::error::{CallError, ConnectError};
 /// The most bytes the writer gathers into one write.
 const WRITE_BATCH_BYTES: usize = 64 * 1024;
 
-/// Opens the pipe, retrying while every instance is busy. Must run on a tokio runtime.
+/// Opens the pipe, retrying while every instance is busy, and checks that its server runs as
+/// the current user before anything is sent. Must run on a tokio runtime.
 #[cfg(windows)]
 pub(crate) async fn open_pipe(
     path: String,
     busy_timeout: Duration,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, ConnectError> {
+    use std::os::windows::io::AsRawHandle;
+
     use tokio::net::windows::named_pipe::ClientOptions;
 
     /// All pipe instances are busy.
@@ -49,7 +52,20 @@ pub(crate) async fn open_pipe(
     let deadline = Instant::now() + busy_timeout;
     loop {
         match ClientOptions::new().open(&path) {
-            Ok(pipe) => return Ok(pipe),
+            // Pipe squatting: another account could have created a pipe with this name first.
+            Ok(pipe) => {
+                return match burrow_transport::pipe_server_is_current_user(pipe.as_raw_handle()) {
+                    Ok(true) => Ok(pipe),
+                    Ok(false) => Err(ConnectError::NotYours {
+                        pipe: path,
+                        reason: "the server runs as another user".into(),
+                    }),
+                    Err(error) => Err(ConnectError::NotYours {
+                        pipe: path,
+                        reason: format!("checking the server's user failed: {error}"),
+                    }),
+                };
+            }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 if Instant::now() >= deadline {
                     return Err(ConnectError::Busy { pipe: path });
@@ -262,6 +278,16 @@ impl Connection {
         params: &M::Params,
         route: Option<(StreamName, Route)>,
     ) -> Result<M::Result, CallError> {
+        let (_, answer) = self.send_request::<M>(params, route)?;
+        Self::finish::<M>(answer).await
+    }
+
+    /// Sends a request and returns its id and the receiver of its response.
+    pub fn send_request<M: Method>(
+        &self,
+        params: &M::Params,
+        route: Option<(StreamName, Route)>,
+    ) -> Result<(RequestId, oneshot::Receiver<Response>), CallError> {
         let id = self.shared.next_id();
         let request = Request::typed::<M>(id.clone(), params);
         let (reply, answer) = oneshot::channel();
@@ -276,6 +302,13 @@ impl Connection {
             self.shared.state().pending.remove(&id);
             return Err(CallError::Disconnected);
         }
+        Ok((id, answer))
+    }
+
+    /// Waits for a response from [`Connection::send_request`].
+    pub async fn finish<M: Method>(
+        answer: oneshot::Receiver<Response>,
+    ) -> Result<M::Result, CallError> {
         let response = answer.await.map_err(|_| CallError::Disconnected)?;
         response.result_as::<M>().map_err(CallError::Rpc)
     }

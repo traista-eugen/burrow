@@ -45,17 +45,21 @@ mod connection;
 mod error;
 mod subscription;
 
+use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use burrow_protocol::methods::{EventsSubscribe, Initialize};
+use burrow_protocol::notifications::Cancel;
 use burrow_protocol::{
-    ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, Method, NotificationMethod,
-    PROTOCOL_VERSION, StreamName, SubscribeParams,
+    CancelParams, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, Method,
+    NotificationMethod, PROTOCOL_VERSION, RequestId, Response, StreamName, SubscribeParams,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 use crate::connection::Connection;
 pub use crate::error::{CallError, ConnectError};
@@ -202,6 +206,17 @@ impl Client {
         self.inner.connection.call::<M>(params, None).await
     }
 
+    /// Starts a call to `M` without waiting for it, so it can be cancelled: see [`PendingCall`].
+    pub fn start_call<M: Method>(&self, params: &M::Params) -> Result<PendingCall<M>, CallError> {
+        let (id, answer) = self.inner.connection.send_request::<M>(params, None)?;
+        Ok(PendingCall {
+            client: self.clone(),
+            id,
+            answer,
+            method: PhantomData,
+        })
+    }
+
     /// Sends notification `N`. It gets no response.
     pub fn notify<N: NotificationMethod>(&self, params: &N::Params) -> Result<(), CallError> {
         self.inner.connection.notify::<N>(params)
@@ -269,6 +284,45 @@ impl Client {
 
     fn connection(&self) -> &Connection {
         &self.inner.connection
+    }
+}
+
+/// A call in flight, from [`Client::start_call`]: await [`PendingCall::result`] for its answer,
+/// or ask `burrowd` to give up with [`PendingCall::cancel`].
+pub struct PendingCall<M: Method> {
+    client: Client,
+    id: RequestId,
+    answer: oneshot::Receiver<Response>,
+    method: PhantomData<fn() -> M>,
+}
+
+impl<M: Method> fmt::Debug for PendingCall<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingCall")
+            .field("method", &M::NAME)
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl<M: Method> PendingCall<M> {
+    /// The request's id.
+    pub fn id(&self) -> &RequestId {
+        &self.id
+    }
+
+    /// Sends `$/cancel` for this call. `burrowd` answers it with the error `cancelled` if it
+    /// gives up, or with the normal result if the work finishes anyway; await
+    /// [`PendingCall::result`] either way.
+    pub fn cancel(&self) -> Result<(), CallError> {
+        self.client.notify::<Cancel>(&CancelParams {
+            id: self.id.clone(),
+        })
+    }
+
+    /// Waits for the answer.
+    pub async fn result(self) -> Result<M::Result, CallError> {
+        Connection::finish::<M>(self.answer).await
     }
 }
 

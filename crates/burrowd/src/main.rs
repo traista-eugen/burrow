@@ -1,29 +1,41 @@
 //! `burrowd`: Burrow's per-user background service (D-002).
 //!
 //! It owns all state as append-only event streams (D-005) and serves clients JSON-RPC over the
-//! named pipe `\\.\pipe\burrow-<user SID>` (D-013). In M1 it serves the connection methods,
-//! event subscriptions and, with `--dev`, `debug/append`.
+//! named pipe `\\.\pipe\burrow-<user SID>` (D-013): the connection methods, event
+//! subscriptions, projects, agents, sessions and the inbox, plus `debug/append` with `--dev`.
 //!
 //! How it fits together:
 //!
 //! - [`server`] accepts clients on the pipe, current user only, one `burrowd` per pipe.
-//! - [`connection`] runs each client: the handshake, requests, subscriptions (one task each).
-//! - [`hub`] is the store thread, the single owner of the event store (D-014).
+//! - [`connection`] runs each client: the handshake, subscriptions, and one task per request.
+//! - [`methods`] dispatches requests to the services below.
+//! - [`hub`] is the store thread, the single owner of the event store (D-014), committing events
+//!   and entity rows together (D-017).
+//! - [`projects`], [`agents`] and [`sessions`] hold current state; [`sessions`] runs agent
+//!   sessions through `burrow-agents` adapters and owns the inbox.
+//! - [`keep_awake`] keeps Windows awake while sessions work.
 //! - [`wire`] maps stored records to `events/event` notifications.
 //! - [`logging`] writes `<data dir>\logs\burrowd.<date>.log`.
 
+mod agents;
+mod cancel;
 mod connection;
 mod hub;
 mod ids;
+mod keep_awake;
 mod logging;
+mod methods;
+mod projects;
 #[cfg(windows)]
 mod server;
+mod sessions;
 mod wire;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use burrow_protocol::AgentId;
 use clap::Parser;
 
 /// Exit code when another `burrowd` already serves the pipe.
@@ -43,10 +55,19 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
-    /// Development mode: accept development-only methods such as `debug/append`
+    /// Development mode: accept development-only methods such as `debug/append`, and offer the
+    /// scripted fake agent (`fake`)
     #[arg(long)]
     dev: bool,
+
+    /// The agents to offer, comma-separated [default: claude,codex,cursor,muse, plus fake with
+    /// --dev]
+    #[arg(long, value_delimiter = ',', value_name = "IDS")]
+    agents: Option<Vec<String>>,
 }
+
+/// The agents offered when `--agents` isn't given.
+const DEFAULT_AGENTS: &[&str] = &["claude", "codex", "cursor", "muse"];
 
 /// Why `burrowd` couldn't start or keep running.
 enum Fatal {
@@ -97,7 +118,8 @@ fn run(args: Args) -> Result<(), Fatal> {
     logging::init(&data_dir.join("logs"))
         .map_err(|error| Fatal::other(format!("can't start logging: {error}")))?;
 
-    let result = start(args.pipe, &data_dir, args.dev);
+    let agents = agent_ids(args.agents.as_deref(), args.dev);
+    let result = start(args.pipe, &data_dir, args.dev, agents);
     match &result {
         Ok(()) => tracing::info!("burrowd stopped"),
         Err(fatal) => tracing::error!("{fatal}"),
@@ -105,7 +127,43 @@ fn run(args: Args) -> Result<(), Fatal> {
     result
 }
 
-fn start(pipe: Option<String>, data_dir: &Path, dev: bool) -> Result<(), Fatal> {
+/// The agents to offer: `--agents`, or the default list. `fake` only with `--dev`.
+fn agent_ids(requested: Option<&[String]>, dev: bool) -> Vec<AgentId> {
+    let mut ids: Vec<AgentId> = match requested {
+        Some(ids) => ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .map(AgentId::from)
+            .collect(),
+        None => {
+            let mut ids: Vec<AgentId> = DEFAULT_AGENTS.iter().copied().map(AgentId::from).collect();
+            if dev {
+                ids.push(AgentId::Fake);
+            }
+            ids
+        }
+    };
+    ids.retain(|id| match id {
+        AgentId::Fake if !dev => {
+            tracing::warn!("the fake agent is offered only with --dev");
+            false
+        }
+        AgentId::Other(other) => {
+            tracing::warn!(agent = other, "no such agent; ignoring it");
+            false
+        }
+        _ => true,
+    });
+    ids
+}
+
+fn start(
+    pipe: Option<String>,
+    data_dir: &Path,
+    dev: bool,
+    agents: Vec<AgentId>,
+) -> Result<(), Fatal> {
     let pipe = match pipe {
         Some(name) => burrow_transport::pipe_path(&name),
         None => burrow_transport::default_pipe_name()
@@ -116,19 +174,30 @@ fn start(pipe: Option<String>, data_dir: &Path, dev: bool) -> Result<(), Fatal> 
         .thread_name("burrowd")
         .build()
         .map_err(|error| Fatal::other(format!("can't start the async runtime: {error}")))?;
-    runtime.block_on(serve(pipe, data_dir, dev))
+    runtime.block_on(serve(pipe, data_dir, dev, agents))
 }
 
 #[cfg(windows)]
-async fn serve(pipe: String, data_dir: &Path, dev: bool) -> Result<(), Fatal> {
+async fn serve(
+    pipe: String,
+    data_dir: &Path,
+    dev: bool,
+    agent_ids: Vec<AgentId>,
+) -> Result<(), Fatal> {
     use std::sync::Arc;
 
+    use burrow_agents::Registry;
+    use burrow_agents::fake::FakeAdapter;
     use burrow_store::Store;
     use tracing::{info, warn};
 
+    use crate::agents::Agents;
     use crate::connection::Context;
     use crate::hub::Hub;
+    use crate::keep_awake::KeepAwake;
+    use crate::projects::Projects;
     use crate::server::{BindError, Listener};
+    use crate::sessions::Sessions;
 
     // The pipe first: it is what makes this the only burrowd for the pipe, so a second one exits
     // before it touches the database.
@@ -142,28 +211,60 @@ async fn serve(pipe: String, data_dir: &Path, dev: bool) -> Result<(), Fatal> {
     let hub = Hub::start(store)
         .map_err(|error| Fatal::other(format!("can't start the store thread: {error}")))?;
 
+    let fake = FakeAdapter::next_to_current_exe()
+        .map(|fake| fake.program().clone())
+        .ok();
+    let registry = Registry::standard(&agent_ids, fake);
+    let agents = Arc::new(Agents::new(registry));
+    let projects = Arc::new(
+        Projects::load(hub.clone())
+            .await
+            .map_err(|error| Fatal::other(format!("can't load projects: {error}")))?,
+    );
+    let keep_awake = KeepAwake::start()
+        .map_err(|error| Fatal::other(format!("can't start the keep-awake thread: {error}")))?;
+    // Marks the sessions that were live when the last burrowd stopped as stopped, before any
+    // client can see them.
+    let sessions = Sessions::load(hub.clone(), agents.clone(), projects.clone(), keep_awake)
+        .await
+        .map_err(|error| Fatal::other(format!("can't load sessions: {error}")))?;
+    agents.detect_in_background();
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         protocol = burrow_protocol::PROTOCOL_VERSION,
         pipe = listener.path(),
         data_dir = %data_dir.display(),
         dev,
+        agents = ?agent_ids,
         "burrowd is listening"
     );
     if dev {
         warn!("development mode: development-only methods such as debug/append are enabled");
     }
 
-    let context = Arc::new(Context { hub, dev });
+    let context = Arc::new(Context {
+        hub,
+        dev,
+        projects,
+        agents,
+        sessions: sessions.clone(),
+    });
     tokio::select! {
         () = server::serve(listener, context) => {}
         () = shutdown_signal() => info!("Ctrl+C: shutting down"),
     }
+    sessions.shutdown().await;
     Ok(())
 }
 
 #[cfg(not(windows))]
-async fn serve(_pipe: String, _data_dir: &Path, _dev: bool) -> Result<(), Fatal> {
+async fn serve(
+    _pipe: String,
+    _data_dir: &Path,
+    _dev: bool,
+    _agents: Vec<AgentId>,
+) -> Result<(), Fatal> {
     Err(Fatal::other("burrowd runs only on Windows for now"))
 }
 
