@@ -1,2 +1,5 @@
 # Normalise line endings: the repository stores LF, and checkouts use LF on every platform.
 * text=auto eol=lf
+
+# Binary assets: never touch their bytes.
+*.ico binary

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 218 218">
+  <!-- Burrow tray glyph for a light taskbar: near-black dachshund silhouette.
+       Keep in sync with tray-dark-theme.svg (same shapes, white fill). Run `cargo xtask icons` after editing. -->
+  <g transform="translate(0 59)" fill="#1C1C1C">
+    <path d="M30 46 Q14 38 8 14" fill="none" stroke="#1C1C1C" stroke-width="12" stroke-linecap="round"/>
+    <rect x="24" y="36" width="122" height="44" rx="22"/>
+    <ellipse cx="136" cy="60" rx="25" ry="25"/>
+    <path d="M124 46 L150 10 L178 22 L160 68 Z" stroke="#1C1C1C" stroke-width="10" stroke-linejoin="round"/>
+    <circle cx="166" cy="22" r="19"/>
+    <path d="M168 5 C182 8 196 15 206 21 C214 26 213 38 203 39 C192 40 180 41 168 40 Z"/>
+    <rect x="30" y="64" width="16" height="32" rx="8"/>
+    <rect x="52" y="64" width="16" height="32" rx="8"/>
+    <rect x="116" y="66" width="16" height="30" rx="8"/>
+    <rect x="138" y="66" width="16" height="30" rx="8"/>
+    <ellipse cx="43" cy="94" rx="11" ry="5.5"/>
+    <ellipse cx="65" cy="94" rx="11" ry="5.5"/>
+    <ellipse cx="129" cy="94" rx="11" ry="5.5"/>
+    <ellipse cx="151" cy="94" rx="11" ry="5.5"/>
+  </g>
+</svg>

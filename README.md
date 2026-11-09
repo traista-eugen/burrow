@@ -1,3 +1,5 @@
+<img src="assets/icon/burrow.svg" width="96" height="96" alt="Burrow icon: a black-and-tan dachshund peeking out of its burrow">
+
 # Burrow
 
 A fast, native desktop app for running AI coding agents. Burrow runs Claude Code, Codex, Cursor and Muse Code side by side. It drives them through durable multi-step flows (issue → plan → PR → review → merge), and lets you steer everything remotely, from your phone included.
@@ -18,6 +20,7 @@ cargo build --workspace
 cargo run -p burrow-app     # desktop app (burrow.exe)
 cargo run -p burrowd        # background service (placeholder for now)
 cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
+cargo xtask icons           # regenerate the .ico files from assets/icon/*.svg
 ```
 
 ## Documentation

@@ -2,6 +2,10 @@
 //!
 //! - `schema`: write the protocol's JSON Schema to `schema/burrow-protocol.schema.json`.
 //! - `schema --check`: fail if that file is out of date, without writing it.
+//! - `icons`: render the SVGs in `assets/icon/` into the `.ico` files the Windows builds embed.
+//! - `icons --check`: fail if any of those `.ico` files is out of date, without writing them.
+
+mod icons;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -9,11 +13,13 @@ use std::{env, fs};
 
 use burrow_protocol::schema::SCHEMA_PATH;
 
-const USAGE: &str = "usage: cargo xtask schema [--check]
+const USAGE: &str = "usage: cargo xtask <schema|icons> [--check]
 
 tasks:
   schema           write schema/burrow-protocol.schema.json from the burrow-protocol types
-  schema --check   fail if schema/burrow-protocol.schema.json is out of date";
+  schema --check   fail if schema/burrow-protocol.schema.json is out of date
+  icons            render assets/icon/*.svg into the .ico files under crates/*/resources/windows
+  icons --check    fail if any of those .ico files is out of date";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -21,6 +27,8 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["schema"] => write_schema(),
         ["schema", "--check"] => check_schema(),
+        ["icons"] => icons::write(&repo_root()),
+        ["icons", "--check"] => icons::check(&repo_root()),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             Ok(())

@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Burrow app icon: a black-and-tan dachshund popping out of its burrow at golden hour.
+       Used for 32 px and up; burrow-small.svg covers 16–24 px. Run `cargo xtask icons` after editing. -->
+  <defs>
+    <linearGradient id="a-sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F9D27E"/>
+      <stop offset="1" stop-color="#F09A5C"/>
+    </linearGradient>
+    <linearGradient id="a-ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7A4A2C"/>
+      <stop offset="1" stop-color="#553220"/>
+    </linearGradient>
+    <clipPath id="a-tile"><rect x="8" y="8" width="240" height="240" rx="56"/></clipPath>
+    <!-- The dog is visible above the hole's centre line, and inside the hole's near half. -->
+    <clipPath id="a-emerge">
+      <rect x="0" y="0" width="256" height="196"/>
+      <ellipse cx="124" cy="196" rx="66" ry="20"/>
+    </clipPath>
+    <clipPath id="a-head">
+      <circle cx="122" cy="100" r="40"/>
+      <path d="M130 66 C156 72 182 84 200 92 C215 99 215 118 200 123 C182 129 156 133 132 137 Z"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#a-tile)">
+    <rect width="256" height="256" fill="url(#a-sky)"/>
+    <circle cx="206" cy="46" r="13" fill="#FFF3D6"/>
+    <path d="M0 178 Q128 160 256 178 V256 H0 Z" fill="url(#a-ground)"/>
+
+    <!-- burrow and dog, scaled up around the hole so the head reads at small sizes -->
+    <g transform="translate(124 196) scale(1.12) translate(-124 -196)">
+    <ellipse cx="124" cy="196" rx="66" ry="20" fill="#1A1012"/>
+
+    <g clip-path="url(#a-emerge)">
+      <!-- neck and tan chest -->
+      <path d="M90 220 C88 172 92 142 104 120 L150 116 C157 140 160 176 160 220 Z" fill="#2B2528"/>
+      <path d="M106 178 C110 164 138 162 144 176 C148 188 146 204 142 220 L108 220 C104 204 102 190 106 178 Z" fill="#C9783E"/>
+      <ellipse cx="124" cy="214" rx="50" ry="22" fill="#000" opacity="0.35"/>
+      <!-- skull + snout, with tan on the lower muzzle and cheek -->
+      <circle cx="122" cy="100" r="40" fill="#2B2528"/>
+      <path d="M130 66 C156 72 182 84 200 92 C215 99 215 118 200 123 C182 129 156 133 132 137 Z" fill="#2B2528"/>
+      <g clip-path="url(#a-head)">
+        <path d="M126 113 C150 109 180 104 216 100 V150 H120 Z" fill="#C9783E"/>
+      </g>
+      <path d="M150 76 C170 82 186 89 198 95 C190 96 170 92 150 86 Z" fill="#4A4246"/>
+      <!-- nose, mouth, tan eyebrow, eye -->
+      <ellipse cx="206" cy="104" rx="10" ry="9" fill="#0B0909"/>
+      <path d="M201 122 C190 127 176 128 164 127" fill="none" stroke="#7A3E1D" stroke-width="3" stroke-linecap="round"/>
+      <ellipse cx="139" cy="76" rx="7" ry="4.5" transform="rotate(-12 139 76)" fill="#C9783E"/>
+      <circle cx="142" cy="91" r="7.5" fill="#0B0909" stroke="#5A5054" stroke-width="2"/>
+      <circle cx="144.5" cy="88.5" r="2.3" fill="#FFF"/>
+      <!-- ear -->
+      <path d="M104 66 C86 72 76 100 78 128 C79 148 96 156 106 142 C116 126 122 98 120 76 Z" fill="#161314"/>
+      <path d="M96 78 C88 92 84 110 86 130" fill="none" stroke="#3A3337" stroke-width="3" stroke-linecap="round"/>
+    </g>
+
+    <!-- front rim of the burrow -->
+    <path d="M58 197 A66 20 0 0 0 190 197" fill="none" stroke="#A06A42" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- tan paws on the rim -->
+    <g fill="#C9783E">
+      <ellipse cx="104" cy="208" rx="16" ry="9"/>
+      <ellipse cx="148" cy="210" rx="16" ry="9"/>
+    </g>
+    <g stroke="#7A3E1D" stroke-width="2.5" stroke-linecap="round">
+      <path d="M99 204 V211 M109 204 V211"/>
+      <path d="M143 206 V213 M153 206 V213"/>
+    </g>
+    </g>
+  </g>
+</svg>

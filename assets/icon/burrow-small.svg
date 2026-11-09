@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Burrow app icon for 16–24 px: same dog as burrow.svg, but full-bleed, with a bigger head
+       and no sun, paws or fine lines. Run `cargo xtask icons` after editing. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F9D27E"/>
+      <stop offset="1" stop-color="#F09A5C"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="256" height="256" rx="48"/></clipPath>
+    <clipPath id="emerge">
+      <rect x="0" y="0" width="256" height="196"/>
+      <ellipse cx="124" cy="196" rx="66" ry="20"/>
+    </clipPath>
+    <clipPath id="head">
+      <circle cx="122" cy="100" r="40"/>
+      <path d="M130 66 C156 72 182 84 200 92 C215 99 215 118 200 123 C182 129 156 133 132 137 Z"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect width="256" height="256" fill="url(#sky)"/>
+    <rect x="0" y="156" width="256" height="100" fill="#6A3E25"/>
+
+    <g transform="translate(112 236) scale(1.25) translate(-112 -236)">
+      <ellipse cx="124" cy="196" rx="66" ry="20" fill="#1A1012"/>
+      <g clip-path="url(#emerge)">
+        <path d="M90 220 C88 172 92 142 104 120 L150 116 C157 140 160 176 160 220 Z" fill="#2B2528"/>
+        <path d="M106 178 C110 164 138 162 144 176 C148 188 146 204 142 220 L108 220 C104 204 102 190 106 178 Z" fill="#C9783E"/>
+        <circle cx="122" cy="100" r="40" fill="#2B2528"/>
+        <path d="M130 66 C156 72 182 84 200 92 C215 99 215 118 200 123 C182 129 156 133 132 137 Z" fill="#2B2528"/>
+        <g clip-path="url(#head)">
+          <path d="M126 113 C150 109 180 104 216 100 V150 H120 Z" fill="#C9783E"/>
+        </g>
+        <ellipse cx="206" cy="104" rx="11" ry="10" fill="#0B0909"/>
+        <ellipse cx="139" cy="75" rx="8" ry="5.5" transform="rotate(-12 139 75)" fill="#C9783E"/>
+        <circle cx="143" cy="91" r="9" fill="#0B0909" stroke="#6A6064" stroke-width="2.5"/>
+        <circle cx="146" cy="88" r="3" fill="#FFF"/>
+        <path d="M104 66 C86 72 76 100 78 128 C79 148 96 156 106 142 C116 126 122 98 120 76 Z" fill="#161314"/>
+      </g>
+    </g>
+  </g>
+</svg>

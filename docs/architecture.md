@@ -122,6 +122,9 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 - **Sleep:** while any session or run is active, `burrowd` asks Windows not to sleep (`SetThreadExecutionState`).
 - **WSL:** a session can run inside a WSL distro (`wsl.exe -d <distro> --`), with path translation between Windows and Linux.
 - **App manifest:** enables per-monitor DPI, long paths (over 260 characters) and UTF-8 as the code page (D-010).
+- **Icons:** the sources are SVGs in `assets/icon/`, and `cargo xtask icons` renders them into committed `.ico` files.
+  - `burrow.exe` embeds `burrow.ico` as icon resource 1. Explorer shows it, and GPUI loads it for every window: title bar, taskbar and Alt+Tab. Sizes 16–24 px come from a simplified drawing (`burrow-small.svg`).
+  - `burrowd` gets two tray glyphs, `tray-dark-theme.ico` (white) and `tray-light-theme.ico` (near-black). It should pick one by the taskbar theme (`SystemUsesLightTheme`). Nothing loads them yet.
 
 ## Remote access
 
@@ -147,7 +150,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrow-agents` | lib | Agent adapters: ACP, MSP, terminal | planned |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |
-| `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json` | `schema` |
+| `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json`; `cargo xtask icons` renders `assets/icon/*.svg` into the Windows `.ico` files | `schema`, `icons` |
 
 The split of planned crates may change while building. This table must stay current.
 

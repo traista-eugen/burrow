@@ -26,6 +26,9 @@ jsonschema = { version = "0.61.0", default-features = false }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 thiserror = "2.0.21"
 tempfile = "3.27.0"
+# `cargo xtask icons`: SVG to PNG. Same version GPUI already uses; no text or
+# embedded raster images in our icons, so their features stay off.
+resvg = { version = "0.45.1", default-features = false }
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.
