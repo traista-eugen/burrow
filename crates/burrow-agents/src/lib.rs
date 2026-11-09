@@ -5,10 +5,11 @@
 //! # Layout
 //!
 //! - [`adapter`]: [`AgentAdapter`] (detect, start) and [`AgentSession`] (prompt, cancel,
-//!   set the model, stop), plus [`AgentEvent`], the normalized events a session emits.
+//!   set the model, stop), plus [`AgentEvent`], the normalized events a session emits, and
+//!   [`find_model`], which finds a model by id or display name.
 //! - [`launcher`]: starts agent processes in Job Objects, with no console window, finds
 //!   Windows shims on `PATH`, and hands the child's stdin and stdout to a protocol client.
-//! - [`detect`]: version, login state and models of Claude Code, Codex, Cursor and Muse.
+//! - [`detect`]: version and login state of Claude Code, Codex, Cursor and Muse.
 //! - [`fake`]: the scripted fake agent, a real child process, for tests and `burrowd --dev`.
 //! - [`acp`]: the ACP adapter for Claude Code, Codex and Cursor, built on `burrow-acp`: launching,
 //!   installing the pinned npm adapters, modes, the event mapping, the stuck-turn watchdog, and
@@ -28,7 +29,8 @@ pub mod msp;
 pub mod registry;
 
 pub use adapter::{
-    AgentAdapter, AgentError, AgentEvent, AgentModes, AgentSession, PermissionOutcome,
-    PermissionReply, PermissionRequest, SessionConfig, StartedSession,
+    AgentAdapter, AgentError, AgentEvent, AgentModes, AgentSession, PermissionId,
+    PermissionOutcome, PermissionReply, PermissionRequest, SessionConfig, StartedSession,
+    find_model,
 };
 pub use registry::{Registry, RegistryOptions};

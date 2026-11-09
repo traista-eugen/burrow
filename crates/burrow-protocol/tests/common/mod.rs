@@ -176,7 +176,7 @@ pub fn samples() -> Vec<Sample> {
                    "models": [{"id": "opus"}, {"id": "sonnet"}], "agentMode": "default",
                    "agentModes": [{"id": "default", "name": "Default"}, {"id": "plan", "name": "Plan Mode"}],
                    "usage": {"inputTokens": 1200, "outputTokens": 300, "costUsd": 0.25},
-                   "createdAt": AT, "updatedAt": AT}),
+                   "createdAt": AT, "updatedAt": AT, "lastActivityAt": AT}),
             json!({"id": "ses_2", "agent": "fake", "mode": "structured", "cwd": "C:\\", "state": "limited",
                    "limit": {"provider": "fake", "message": "simulated limit"}, "archived": true,
                    "createdAt": AT, "updatedAt": AT}),
@@ -199,6 +199,7 @@ pub fn samples() -> Vec<Sample> {
         ],
         "SessionPromptResult": SessionPromptResult => [json!({"turnId": "trn_1"})],
         "SessionSetAgentModeParams": SessionSetAgentModeParams => [json!({"sessionId": "ses_1", "agentMode": "plan"})],
+        "SessionRenameParams": SessionRenameParams => [json!({"sessionId": "ses_1", "title": "Fix the login bug"})],
         "SessionSetModelParams": SessionSetModelParams => [json!({"sessionId": "ses_1", "model": "sonnet"})],
         "SessionState": SessionState => [
             json!("starting"), json!("idle"), json!("working"), json!("waiting"), json!("limited"),
@@ -206,7 +207,7 @@ pub fn samples() -> Vec<Sample> {
         ],
         "SessionSummary": SessionSummary => [
             json!({"id": "ses_1", "projectId": "prj_1", "agent": "claude", "model": "opus", "title": "Fix it",
-                   "state": "idle", "createdAt": AT, "updatedAt": AT}),
+                   "state": "idle", "createdAt": AT, "updatedAt": AT, "lastActivityAt": AT}),
             json!({"id": "ses_2", "agent": "fake", "state": "stopped", "archived": true, "createdAt": AT, "updatedAt": AT}),
         ],
         "SessionUsage": SessionUsage => [
@@ -278,7 +279,9 @@ pub fn samples() -> Vec<Sample> {
         ],
         "EntityRenamed": Event => [json!({"type": "entityRenamed", "entity": "run", "id": "run_1", "title": "Deliver #12"})],
         "EntityStateChanged": Event => [
-            json!({"type": "entityStateChanged", "entity": "session", "id": "ses_1", "state": "working"}),
+            json!({"type": "entityStateChanged", "entity": "session", "id": "ses_1", "state": "working",
+                   "lastActivityAt": AT}),
+            json!({"type": "entityStateChanged", "entity": "run", "id": "run_1", "state": "running"}),
         ],
         "EntityRemoved": Event => [json!({"type": "entityRemoved", "entity": "session", "id": "ses_1"})],
         "EntityKind": EntityKind => [json!("project"), json!("session"), json!("run"), json!("device")],

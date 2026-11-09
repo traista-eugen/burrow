@@ -13,8 +13,8 @@ use std::sync::Arc;
 use burrow_protocol::methods::{
     AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxGet, InboxList, InboxRespond, Ping,
     ProjectAdd, ProjectGet, ProjectList, ProjectRemove, SessionArchive, SessionCancel,
-    SessionCreate, SessionGet, SessionList, SessionPrompt, SessionSetAgentMode, SessionSetModel,
-    SessionStop, UsageGet,
+    SessionCreate, SessionGet, SessionList, SessionPrompt, SessionRename, SessionSetAgentMode,
+    SessionSetModel, SessionStop, UsageGet,
 };
 use burrow_protocol::{
     DebugAppendParams, DebugAppendResult, Empty, ErrorKind, ErrorObject, Method, Request, Response,
@@ -89,11 +89,8 @@ pub async fn handle(context: &Arc<Context>, request: Request, cancel: Cancel) ->
         }
 
         SessionList::NAME => {
-            answer::<SessionList, _, _>(
-                &request,
-                |params| async move { Ok(c.sessions.list(&params)) },
-            )
-            .await
+            answer::<SessionList, _, _>(&request, |params| async move { c.sessions.list(&params) })
+                .await
         }
         SessionCreate::NAME => {
             answer::<SessionCreate, _, _>(&request, |params| async {
@@ -128,6 +125,12 @@ pub async fn handle(context: &Arc<Context>, request: Request, cancel: Cancel) ->
         SessionSetAgentMode::NAME => {
             answer::<SessionSetAgentMode, _, _>(&request, |params| async move {
                 c.sessions.set_agent_mode(params).await.map(|()| Empty {})
+            })
+            .await
+        }
+        SessionRename::NAME => {
+            answer::<SessionRename, _, _>(&request, |params| async move {
+                c.sessions.rename(params).await.map(|()| Empty {})
             })
             .await
         }

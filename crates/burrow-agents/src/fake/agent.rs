@@ -8,6 +8,7 @@
 //! |---|---|
 //! | anything else | A thought, then `Echo: <prompt>` streamed word by word, then usage |
 //! | `/permission` | A tool call and a permission request; the turn waits for the answer |
+//! | `/withdraw` | A permission request that the fake withdraws after 200 ms, as if it timed out; the turn then carries on without the answer |
 //! | `/limit` | A simulated usage limit that resets in an hour; the turn ends with `limit` |
 //! | `/slow` | 100 chunks, 100 ms apart, so there is time to cancel |
 //! | `/plan` | A three-step plan |
@@ -39,6 +40,8 @@ const SLEEPER_LIFETIME: Duration = Duration::from_secs(600);
 const SLOW_START: Duration = Duration::from_secs(60);
 /// The pause between streamed words.
 const WORD_DELAY: Duration = Duration::from_millis(10);
+/// How long `/withdraw` waits for an answer before it withdraws its question.
+const WITHDRAW_AFTER: Duration = Duration::from_millis(200);
 
 /// The fake agent's `main`.
 pub fn main() -> ExitCode {
@@ -224,6 +227,7 @@ impl Agent {
         let text = text.trim();
         let result = match text.split_whitespace().next() {
             Some("/permission") => self.permission(),
+            Some("/withdraw") => self.withdraw(),
             Some("/limit") => self.limit(),
             Some("/slow") => self.slow(),
             Some("/plan") => self.plan(),
@@ -331,6 +335,62 @@ impl Agent {
                 ToAgent::Prompt { .. } | ToAgent::Permission { .. } => {}
             }
         }
+    }
+
+    /// Asks, waits [`WITHDRAW_AFTER`] for an answer, then withdraws the question and carries
+    /// on, as an agent whose question timed out does.
+    fn withdraw(&mut self) -> Result<(), Interrupt> {
+        let call = self.id("call");
+        let request = self.id("perm");
+        let title = "Run cleanup.ps1".to_owned();
+        self.send(&FromAgent::ToolCall {
+            id: call.clone(),
+            title: title.clone(),
+            kind: ToolKind::Execute,
+            status: ToolCallStatus::Pending,
+        });
+        self.send(&FromAgent::Permission {
+            id: request.clone(),
+            tool_call_id: call.clone(),
+            title,
+            options: vec![
+                option("allow", "Allow", PermissionOptionKind::AllowOnce),
+                option("reject", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+        });
+        let deadline = std::time::Instant::now() + WITHDRAW_AFTER;
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let command = match self.inbox.recv_timeout(left) {
+                Ok(command) => command,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => std::process::exit(0),
+            };
+            match command {
+                ToAgent::Cancel => {
+                    self.send(&FromAgent::ToolCallUpdate {
+                        id: call.clone(),
+                        status: ToolCallStatus::Failed,
+                        text: Some("Cancelled".into()),
+                    });
+                    return Err(Interrupt::Cancelled);
+                }
+                // An answer that beat the timeout: say what it was and carry on alike.
+                ToAgent::Permission { id, option_id } if id == request => {
+                    eprintln!("burrow-fake-agent: answered {option_id:?} before the withdrawal");
+                }
+                ToAgent::SetModel { model } => self.set_model(model),
+                ToAgent::Prompt { .. } | ToAgent::Permission { .. } => {}
+            }
+        }
+        self.send(&FromAgent::Withdraw { id: request });
+        self.send(&FromAgent::ToolCallUpdate {
+            id: call,
+            status: ToolCallStatus::Failed,
+            text: Some("Nobody answered in time".into()),
+        });
+        self.stream("Nobody answered, so I skipped the cleanup.")?;
+        self.end(TurnEndReason::Completed, None);
+        Ok(())
     }
 
     fn limit(&mut self) -> Result<(), Interrupt> {

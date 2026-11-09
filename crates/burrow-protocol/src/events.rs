@@ -241,7 +241,8 @@ pub struct EntityRenamed {
     pub title: String,
 }
 
-/// `entityStateChanged`: an entity moved to a new state.
+/// `entityStateChanged`: an entity moved to a new state, or, for a session, its last activity
+/// moved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityStateChanged {
@@ -249,9 +250,14 @@ pub struct EntityStateChanged {
     pub entity: EntityKind,
     /// The entity's id.
     pub id: String,
-    /// The new state: one of the session states or run states in protocol.md. Kept as a string
-    /// so new states don't break older clients.
+    /// The state: one of the session states or run states in protocol.md. Kept as a string so
+    /// new states don't break older clients. Usually a new state; the same state when only
+    /// `lastActivityAt` moved.
     pub state: String,
+    /// A session's `lastActivityAt`, so a list sorted by activity can re-sort without
+    /// `session/get`. Always present on session events from `burrowd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<Timestamp>,
 }
 
 /// `entityRemoved`: the entity left the default lists. A project was removed, or a session or

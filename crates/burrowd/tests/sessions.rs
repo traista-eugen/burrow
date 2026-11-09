@@ -14,7 +14,7 @@ use burrow_client::{CallError, Client, Subscription};
 use burrow_protocol::methods::{
     AgentList, AgentRefresh, InboxGet, InboxList, InboxRespond, Ping, ProjectAdd, ProjectGet,
     ProjectList, ProjectRemove, SessionArchive, SessionCancel, SessionCreate, SessionGet,
-    SessionList, SessionPrompt, SessionSetModel, SessionStop, UsageGet,
+    SessionList, SessionPrompt, SessionRename, SessionSetModel, SessionStop, UsageGet,
 };
 use burrow_protocol::*;
 use common::*;
@@ -847,4 +847,246 @@ async fn agents_and_projects() {
         folder.is_dir(),
         "removing a project never touches its files"
     );
+}
+
+/// The `entityStateChanged` summaries of `session` among `events`.
+fn summaries<'a>(events: &'a [StreamEvent], session: &str) -> Vec<&'a EntityStateChanged> {
+    events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::EntityStateChanged(changed) if changed.id == session => Some(changed),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn list(client: &Client, params: SessionListParams) -> Vec<String> {
+    client
+        .call::<SessionList>(&params)
+        .await
+        .expect("session/list")
+        .into_iter()
+        .map(|summary| summary.id)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn titles_renames_and_activity_keep_the_sidebar_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_daemon, client) = start(dir.path(), "sidebar").await;
+    let mut index = client.subscribe(StreamName::index(), None).await.unwrap();
+    let older = create(&client, dir.path()).await;
+    let newer = create(&client, dir.path()).await;
+    assert_eq!(older.last_activity_at, Some(older.created_at));
+
+    // No turns yet: newest first.
+    assert_eq!(
+        list(&client, SessionListParams::default()).await,
+        [newer.id.clone(), older.id.clone()]
+    );
+
+    // A turn in the older session moves it to the top, and titles it.
+    let mut events = client
+        .subscribe(StreamName::session(&older.id), None)
+        .await
+        .unwrap();
+    prompt(&client, &older.id, "  Fix   the login bug\nand add a test").await;
+    until(&mut events, turn_ended).await;
+    until(&mut events, |event| matches!(event, Event::StateChanged(_))).await;
+    let session = get(&client, &older.id).await;
+    assert_eq!(session.title.as_deref(), Some("Fix the login bug"));
+    let active = session.last_activity_at.expect("lastActivityAt");
+    assert!(active > older.created_at && active > newer.created_at);
+    let summaries_now = client
+        .call::<SessionList>(&SessionListParams::default())
+        .await
+        .unwrap();
+    assert_eq!(summaries_now[0].id, older.id);
+    assert_eq!(summaries_now[0].last_activity_at, Some(active));
+    assert_eq!(summaries_now[1].id, newer.id);
+
+    // The index alone keeps a sidebar sorted: the title, and each state change with its
+    // activity; the turn's end carries the session's lastActivityAt.
+    let seen = until(&mut index, |event| {
+        matches!(event, Event::EntityStateChanged(c)
+            if c.id == older.id && c.state == "idle" && c.last_activity_at == Some(active))
+    })
+    .await;
+    assert!(seen.iter().any(|event| matches!(&event.event,
+        Event::EntityRenamed(renamed) if renamed.id == older.id && renamed.title == "Fix the login bug")));
+    let changes = summaries(&seen, &older.id);
+    assert!(
+        changes
+            .iter()
+            .all(|changed| changed.last_activity_at.is_some())
+    );
+    let states: Vec<&str> = changes
+        .iter()
+        .map(|changed| changed.state.as_str())
+        .collect();
+    assert_eq!(states[states.len() - 2..], ["working", "idle"]);
+
+    // Renaming: any title, trimmed; the first prompt then leaves it alone.
+    let rename = |session: &str, title: &str| SessionRenameParams {
+        session_id: session.to_owned(),
+        title: title.to_owned(),
+    };
+    client
+        .call::<SessionRename>(&rename(&newer.id, "  Tidy the docs "))
+        .await
+        .unwrap();
+    let renamed = until(&mut index, |event| matches!(event, Event::EntityRenamed(_))).await;
+    assert!(matches!(&renamed.last().unwrap().event,
+        Event::EntityRenamed(r) if r.id == newer.id && r.title == "Tidy the docs" && r.entity == EntityKind::Session));
+    let mut newer_events = client
+        .subscribe(StreamName::session(&newer.id), None)
+        .await
+        .unwrap();
+    prompt(&client, &newer.id, "something else").await;
+    until(&mut newer_events, turn_ended).await;
+    until(&mut newer_events, |event| {
+        matches!(event, Event::StateChanged(_))
+    })
+    .await;
+    assert_eq!(
+        get(&client, &newer.id).await.title.as_deref(),
+        Some("Tidy the docs")
+    );
+    let long = "x".repeat(201);
+    for bad in ["   ", long.as_str()] {
+        let error = client
+            .call::<SessionRename>(&rename(&newer.id, bad))
+            .await
+            .unwrap_err();
+        assert_eq!(error.rpc().unwrap().code, code::INVALID_PARAMS, "{bad:?}");
+    }
+    assert_eq!(
+        error_kind(client.call::<SessionRename>(&rename("ses_nope", "x")).await),
+        ErrorKind::NotFound
+    );
+
+    // Paging follows the same order.
+    let first = list(
+        &client,
+        SessionListParams {
+            limit: Some(1),
+            ..SessionListParams::default()
+        },
+    )
+    .await;
+    assert_eq!(first, std::slice::from_ref(&newer.id));
+    let rest = list(
+        &client,
+        SessionListParams {
+            before: Some(newer.id.clone()),
+            ..SessionListParams::default()
+        },
+    )
+    .await;
+    assert_eq!(rest, std::slice::from_ref(&older.id));
+    let unknown = client
+        .call::<SessionList>(&SessionListParams {
+            before: Some("ses_nope".into()),
+            ..SessionListParams::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.rpc().unwrap().code, code::INVALID_PARAMS);
+
+    // A stopped session can still be renamed.
+    client
+        .call::<SessionStop>(&SessionIdParams {
+            session_id: newer.id.clone(),
+        })
+        .await
+        .unwrap();
+    client
+        .call::<SessionRename>(&rename(&newer.id, "Done"))
+        .await
+        .unwrap();
+    assert_eq!(get(&client, &newer.id).await.title.as_deref(), Some("Done"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawn_permission_request_expires_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_daemon, client) = start(dir.path(), "withdraw").await;
+    let session = create(&client, dir.path()).await;
+    let mut index = client.subscribe(StreamName::index(), None).await.unwrap();
+    let mut events = client
+        .subscribe(StreamName::session(&session.id), None)
+        .await
+        .unwrap();
+
+    prompt(&client, &session.id, "/withdraw").await;
+    let turn = until(&mut events, turn_ended).await;
+    let after = until(&mut events, |event| matches!(event, Event::StateChanged(_))).await;
+    assert_eq!(states(&after), ["idle"]);
+
+    // Asked, waited, then the agent withdrew: the item expired before the turn went on.
+    let kinds = types(&turn);
+    let asked = kinds
+        .iter()
+        .position(|kind| *kind == "permissionRequested")
+        .expect("asked");
+    assert_eq!(
+        kinds[asked..asked + 4],
+        [
+            "permissionRequested",
+            "stateChanged",
+            "permissionResolved",
+            "stateChanged"
+        ],
+        "{kinds:?}"
+    );
+    assert_eq!(states(&turn), ["working", "waiting", "working"]);
+    let Event::PermissionRequested(request) = &turn[asked].event else {
+        unreachable!()
+    };
+    let Event::PermissionResolved(resolved) = &turn[asked + 2].event else {
+        unreachable!()
+    };
+    assert_eq!(resolved.inbox_item_id, request.inbox_item_id);
+    assert_eq!(resolved.tool_call_id, request.tool_call_id);
+    assert_eq!(resolved.status, InboxItemStatus::Expired);
+    assert_eq!((&resolved.option_id, &resolved.by), (&None, &None));
+    assert_eq!(
+        message_text(&turn),
+        "Nobody answered, so I skipped the cleanup."
+    );
+    assert!(matches!(&turn.last().unwrap().event,
+        Event::TurnEnded(ended) if ended.reason == TurnEndReason::Completed));
+
+    // The inbox: expired, unanswerable, and said so on the index.
+    let item = client
+        .call::<InboxGet>(&InboxItemIdParams {
+            item_id: request.inbox_item_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(item.status, InboxItemStatus::Expired);
+    assert!(item.resolution.is_none());
+    assert!(item.closed_at.is_some());
+    let answer = client
+        .call::<InboxRespond>(&InboxRespondParams {
+            item_id: item.id.clone(),
+            action: "allow".into(),
+            payload: None,
+        })
+        .await;
+    assert_eq!(error_kind(answer), ErrorKind::Conflict);
+    let on_index = until(&mut index, |event| {
+        matches!(event, Event::InboxItemResolved(_))
+    })
+    .await;
+    assert!(matches!(&on_index.last().unwrap().event,
+        Event::InboxItemResolved(r) if r.item_id == item.id && r.status == InboxItemStatus::Expired && r.action.is_none()));
+    let open = client
+        .call::<InboxList>(&InboxListParams {
+            status: Some(InboxItemStatus::Open),
+            ..InboxListParams::default()
+        })
+        .await
+        .unwrap();
+    assert!(open.is_empty());
 }

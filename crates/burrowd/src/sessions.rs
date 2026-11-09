@@ -17,7 +17,11 @@
 //!   append costs one fsync per 100 ms at most (D-012).
 //! - **Permission requests** become inbox items of kind `permission`. The session is `waiting`
 //!   while any is open. `inbox/respond` resolves the item and passes the answer to the agent;
-//!   an item that is no longer open gets `conflict`.
+//!   an item that is no longer open gets `conflict`. A request the agent withdraws
+//!   ([`AgentEvent::PermissionWithdrawn`]) expires at once (D-031).
+//! - **Activity.** `lastActivityAt` moves when a turn starts or ends. Every change of state or
+//!   activity puts `entityStateChanged`, carrying both, on the `index`, so a sidebar sorted by
+//!   activity stays current from the index alone. `session/list` sorts by it.
 //! - **Keep-awake** is held while any session is `working` (not `waiting`, so a forgotten
 //!   question doesn't keep the PC up for days).
 //! - **Restarts.** Agent processes die with `burrowd` (Job Objects, D-007). On startup, sessions
@@ -30,8 +34,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use burrow_agents::{
-    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply,
-    PermissionRequest, SessionConfig,
+    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionId, PermissionOutcome,
+    PermissionReply, PermissionRequest, SessionConfig, find_model,
 };
 use burrow_protocol::{
     AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, ContentBlock, EntityCreated,
@@ -40,9 +44,9 @@ use burrow_protocol::{
     InboxItemResolved, InboxItemStatus, InboxListParams, InboxResolution, InboxRespondParams,
     InboxSource, LimitInfo, LimitReached, ModelChanged, PermissionOptionKind, PermissionRequested,
     PermissionResolved, ProviderUsage, Session, SessionCreateParams, SessionListParams,
-    SessionMode, SessionPromptParams, SessionPromptResult, SessionSetAgentModeParams,
-    SessionSetModelParams, SessionState, SessionSummary, StateChanged, StreamName, Timestamp,
-    TurnEndReason, TurnEnded, Usage, UsageSource, UserMessage,
+    SessionMode, SessionPromptParams, SessionPromptResult, SessionRenameParams,
+    SessionSetAgentModeParams, SessionSetModelParams, SessionState, SessionSummary, StateChanged,
+    StreamName, Timestamp, TurnEndReason, TurnEnded, Usage, UsageSource, UserMessage,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -70,6 +74,8 @@ const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 1000;
 /// The longest title made from a prompt, in characters.
 const TITLE_CHARS: usize = 60;
+/// The longest title `session/rename` accepts, in characters.
+const MAX_TITLE_CHARS: usize = 200;
 /// How long a clean shutdown waits for sessions to stop.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
 
@@ -183,7 +189,9 @@ impl Sessions {
         let mut sessions = BTreeMap::new();
         for row in hub.entities(SESSION).await? {
             match row.body::<Session>() {
-                Ok(session) => {
+                Ok(mut session) => {
+                    // Rows from before `lastActivityAt` existed: no turn has been seen since.
+                    session.last_activity_at.get_or_insert(session.created_at);
                     sessions.insert(session.id.clone(), session);
                 }
                 Err(error) => {
@@ -247,6 +255,7 @@ impl Sessions {
                             message: Some("burrowd stopped during the turn".into()),
                         },
                     );
+                    session.last_activity_at = Some(now);
                 }
                 let reason = "burrowd stopped, and the agent process ended with it";
                 session.state = SessionState::Stopped;
@@ -278,6 +287,14 @@ impl Sessions {
                     .put(INBOX, &id, item);
             }
             hub.commit(commit).await?;
+        }
+
+        // What each agent's latest session offered is what agent/list reports (D-032).
+        for session in sessions.values() {
+            if !session.models.is_empty() {
+                // Ids sort by creation, so later sessions replace earlier ones.
+                agents.learn_models(&session.agent, session.models.clone());
+            }
         }
 
         let slots = sessions
@@ -397,6 +414,7 @@ impl Sessions {
             archived: false,
             created_at: now,
             updated_at: now,
+            last_activity_at: Some(now),
         };
         let slot = Arc::new(Slot::new(session.clone()));
         let mut core = slot.core.lock().await;
@@ -439,6 +457,10 @@ impl Sessions {
         let (state, reason, error) = match start {
             Start::Done(Ok(started)) => {
                 let modes = started.session.agent_modes();
+                if !started.models.is_empty() {
+                    self.agents
+                        .learn_models(&session.agent, started.models.clone());
+                }
                 core.agent = Some(started.session);
                 let mut change = core.begin();
                 change.next.state = SessionState::Idle;
@@ -487,23 +509,37 @@ impl Sessions {
         Ok(self.slot(id)?.snapshot())
     }
 
-    /// `session/list`: newest first.
-    pub fn list(&self, params: &SessionListParams) -> Vec<SessionSummary> {
+    /// `session/list`: most recent activity first, then newest first. `before` names the last
+    /// session of the previous page; the page goes on after it in the same order.
+    pub fn list(&self, params: &SessionListParams) -> Result<Vec<SessionSummary>, ErrorObject> {
         let slots: Vec<Arc<Slot>> = self.shared().slots.values().cloned().collect();
         let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
-        slots
+        let mut sessions: Vec<Session> = slots.iter().map(|slot| slot.snapshot()).collect();
+        let key = |session: &Session| (session.activity(), session.id.clone());
+        sessions.sort_by(|a, b| (b.activity(), &b.id).cmp(&(a.activity(), &a.id)));
+        let after = match &params.before {
+            Some(before) => Some(
+                sessions
+                    .iter()
+                    .find(|session| session.id == *before)
+                    .map(key)
+                    .ok_or_else(|| {
+                        ErrorObject::invalid_params(format!(
+                            "before: no session {before} to continue after"
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        Ok(sessions
             .iter()
-            .rev()
-            .map(|slot| slot.snapshot())
             .filter(|session| {
-                params
-                    .before
+                after.as_ref().is_none_or(|(activity, id)| {
+                    (session.activity(), &session.id) < (*activity, id)
+                }) && params
+                    .project_id
                     .as_ref()
-                    .is_none_or(|before| session.id < *before)
-                    && params
-                        .project_id
-                        .as_ref()
-                        .is_none_or(|project| session.project_id.as_ref() == Some(project))
+                    .is_none_or(|project| session.project_id.as_ref() == Some(project))
                     && params
                         .state
                         .as_ref()
@@ -511,8 +547,24 @@ impl Sessions {
                     && (params.include_archived || !session.archived)
             })
             .take(limit)
-            .map(|session| SessionSummary::from(&session))
-            .collect()
+            .map(SessionSummary::from)
+            .collect())
+    }
+
+    /// `session/rename`: sets the title, of any session, live or not.
+    pub async fn rename(&self, params: SessionRenameParams) -> Result<(), ErrorObject> {
+        let title = params.title.trim();
+        if title.is_empty() {
+            return Err(ErrorObject::invalid_params("the title is empty"));
+        }
+        if title.chars().count() > MAX_TITLE_CHARS {
+            return Err(ErrorObject::invalid_params(format!(
+                "the title is longer than {MAX_TITLE_CHARS} characters"
+            )));
+        }
+        let slot = self.slot(&params.session_id)?;
+        let mut core = slot.core.lock().await;
+        core.rename(self, title.to_owned()).await
     }
 
     /// `session/prompt`.
@@ -707,10 +759,12 @@ impl Core {
         }
     }
 
-    /// Commits a change: adds `stateChanged` and `entityStateChanged` if the state changed, and
-    /// the rows of whatever changed. Memory follows only once the commit succeeded.
+    /// Commits a change: adds `stateChanged` if the state changed, `entityStateChanged` if the
+    /// state or the last activity did, and the rows of whatever changed. Memory follows only
+    /// once the commit succeeded.
     async fn finish(&mut self, ctx: &Sessions, mut change: Change) -> Result<(), ErrorObject> {
-        if change.next.state != self.session.state {
+        let state_changed = change.next.state != self.session.state;
+        if state_changed {
             let reason = match change.next.state {
                 SessionState::Stopped | SessionState::Failed => change.next.reason.clone(),
                 _ => None,
@@ -722,6 +776,8 @@ impl Core {
                     reason,
                 },
             );
+        }
+        if state_changed || change.next.last_activity_at != self.session.last_activity_at {
             change
                 .commit
                 .event(&StreamName::index(), state_event(&change.next));
@@ -797,6 +853,7 @@ impl Core {
                 self.finish(ctx, change).await
             }
             AgentEvent::Permission(request) => self.permission(ctx, request).await,
+            AgentEvent::PermissionWithdrawn(permission) => self.withdrawn(ctx, permission).await,
             AgentEvent::TurnEnded { reason, message } => {
                 if self.session.turn_id.is_none() {
                     debug!(
@@ -1035,38 +1092,53 @@ impl Core {
         self.finish(ctx, change).await
     }
 
+    /// The agent withdrew a permission request: its item expires now, and the session works
+    /// again once no other request is open. A request answered or expired meanwhile is ignored.
+    async fn withdrawn(
+        &mut self,
+        ctx: &Sessions,
+        permission: PermissionId,
+    ) -> Result<(), ErrorObject> {
+        let Some(id) = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.reply.id() == permission)
+            .map(|(id, _)| id.clone())
+        else {
+            debug!(
+                session = self.session.id,
+                %permission,
+                "the agent withdrew a request that is no longer open"
+            );
+            return Ok(());
+        };
+        let pending = self.pending.remove(&id).expect("found above");
+        let mut change = self.begin();
+        // The agent stopped waiting: its reply is dropped, which an adapter reads as cancelled.
+        drop(expire_one(&self.stream, &mut change, &id, pending));
+        if self.pending.is_empty() && change.next.state == SessionState::Waiting {
+            change.next.state = SessionState::Working;
+        }
+        info!(
+            session = self.session.id,
+            item = id,
+            "the agent withdrew its permission request"
+        );
+        self.finish(ctx, change).await
+    }
+
     /// Expires every open permission request and tells the agent nobody answered.
     fn expire_pending(&mut self, change: &mut Change) {
-        let now = Timestamp::now();
         for (id, pending) in std::mem::take(&mut self.pending) {
-            let Pending {
-                mut item,
-                tool_call_id,
-                reply,
-            } = pending;
+            let reply = expire_one(&self.stream, change, &id, pending);
             reply.send(PermissionOutcome::Cancelled);
-            expire(&mut item, now);
-            change
-                .commit
-                .event(
-                    &self.stream,
-                    PermissionResolved {
-                        inbox_item_id: id.clone(),
-                        tool_call_id,
-                        status: InboxItemStatus::Expired,
-                        option_id: None,
-                        by: None,
-                    },
-                )
-                .event(&StreamName::index(), expired_event(&id));
-            change.items.push(item);
         }
         if change.next.state == SessionState::Waiting {
             change.next.state = SessionState::Working;
         }
     }
 
-    /// Ends the running turn, if any.
+    /// Ends the running turn, if any, and records the activity.
     fn end_turn(&mut self, change: &mut Change, reason: TurnEndReason, message: Option<String>) {
         if let Some(turn_id) = change.next.turn_id.take() {
             change.commit.event(
@@ -1077,7 +1149,25 @@ impl Core {
                     message,
                 },
             );
+            change.next.last_activity_at = Some(Timestamp::now());
         }
+    }
+
+    async fn rename(&mut self, ctx: &Sessions, title: String) -> Result<(), ErrorObject> {
+        if self.session.title.as_deref() == Some(title.as_str()) {
+            return Ok(());
+        }
+        let mut change = self.begin();
+        change.commit.event(
+            &StreamName::index(),
+            EntityRenamed {
+                entity: EntityKind::Session,
+                id: self.session.id.clone(),
+                title: title.clone(),
+            },
+        );
+        change.next.title = Some(title);
+        self.finish(ctx, change).await
     }
 
     async fn prompt(
@@ -1133,6 +1223,7 @@ impl Core {
         change.next.turn_id = Some(turn_id.clone());
         change.next.state = SessionState::Working;
         change.next.limit = None;
+        change.next.last_activity_at = Some(Timestamp::now());
         self.finish(ctx, change).await?;
 
         let sent = self
@@ -1172,6 +1263,10 @@ impl Core {
                 format!("the session is {}", self.session.state),
             ));
         };
+        // A model may be named by its display name, such as Cursor's `gpt-5.5` for
+        // `gpt-5.5[context=272k,…]` (D-032). The agent gets, and the session records, the id.
+        let model =
+            find_model(&self.session.models, &model).map_or(model, |found| found.id.clone());
         agent.set_model(model.clone()).await.map_err(agent_error)?;
         self.model_changed(ctx, model).await
     }
@@ -1425,6 +1520,38 @@ fn expire(item: &mut InboxItem, now: Timestamp) {
     item.closed_at = Some(now);
 }
 
+/// Expires one open permission request in `change`: `permissionResolved` and
+/// `inboxItemResolved`, both `expired`, and the item's row. Returns its reply, for the caller
+/// to answer or drop.
+fn expire_one(
+    stream: &StreamName,
+    change: &mut Change,
+    id: &str,
+    pending: Pending,
+) -> PermissionReply {
+    let Pending {
+        mut item,
+        tool_call_id,
+        reply,
+    } = pending;
+    expire(&mut item, Timestamp::now());
+    change
+        .commit
+        .event(
+            stream,
+            PermissionResolved {
+                inbox_item_id: id.to_owned(),
+                tool_call_id,
+                status: InboxItemStatus::Expired,
+                option_id: None,
+                by: None,
+            },
+        )
+        .event(&StreamName::index(), expired_event(id));
+    change.items.push(item);
+    reply
+}
+
 fn expired_event(item_id: &str) -> InboxItemResolved {
     InboxItemResolved {
         item_id: item_id.to_owned(),
@@ -1439,6 +1566,7 @@ fn state_event(session: &Session) -> EntityStateChanged {
         entity: EntityKind::Session,
         id: session.id.clone(),
         state: session.state.to_string(),
+        last_activity_at: Some(session.activity()),
     }
 }
 

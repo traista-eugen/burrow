@@ -90,10 +90,10 @@ pub use session::{
     LimitReached, ModelChanged, PermissionOption, PermissionOptionKind, PermissionRequested,
     PermissionResolved, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, Session,
     SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
-    SessionPromptResult, SessionSetAgentModeParams, SessionSetModelParams, SessionState,
-    SessionSummary, SessionUsage, StateChanged, TerminalOpened, ToolCall, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind, TurnEndReason, TurnEnded, Usage,
-    UserMessage,
+    SessionPromptResult, SessionRenameParams, SessionSetAgentModeParams, SessionSetModelParams,
+    SessionState, SessionSummary, SessionUsage, StateChanged, TerminalOpened, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind, TurnEndReason,
+    TurnEnded, Usage, UserMessage,
 };
 pub use time::Timestamp;
 

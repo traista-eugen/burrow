@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod wire;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,8 +31,8 @@ use tracing::{debug, warn};
 
 use self::wire::{FromAgent, ToAgent};
 use crate::adapter::{
-    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply,
-    PermissionRequest, SessionConfig, StartedSession,
+    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionId, PermissionOutcome,
+    PermissionReply, PermissionRequest, SessionConfig, StartedSession,
 };
 use crate::launcher::{self, LaunchSpec, ProcessHandle};
 
@@ -215,6 +216,8 @@ async fn read_loop(
     handle: ProcessHandle,
     stopping: Arc<AtomicBool>,
 ) {
+    // The fake's permission request ids, and the ids of the replies they became.
+    let mut asked: HashMap<String, PermissionId> = HashMap::new();
     loop {
         let line = match lines.next_line().await {
             Ok(Some(line)) => line,
@@ -281,6 +284,7 @@ async fn read_loop(
                 options,
             } => {
                 let (reply, answer) = PermissionReply::channel();
+                asked.insert(id.clone(), reply.id());
                 let writer = writer.clone();
                 tokio::spawn(async move {
                     let option_id = match answer.await {
@@ -304,6 +308,13 @@ async fn read_loop(
                     reply,
                 })
             }
+            FromAgent::Withdraw { id } => match asked.remove(&id) {
+                Some(permission) => AgentEvent::PermissionWithdrawn(permission),
+                None => {
+                    debug!(id, "the fake withdrew a request it never made");
+                    continue;
+                }
+            },
             FromAgent::Usage {
                 input_tokens,
                 output_tokens,

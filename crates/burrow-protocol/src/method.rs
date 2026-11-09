@@ -121,7 +121,7 @@ method_table! {
         AgentInstall = "agent/install" (AgentInstallParams) -> AgentInfo;
         /// `usage/get`: each provider's usage and limit, as last reported.
         UsageGet = "usage/get" (Empty) -> Vec<ProviderUsage>;
-        /// `session/list`: sessions, newest first.
+        /// `session/list`: sessions, most recent activity first.
         SessionList = "session/list" (SessionListParams) -> Vec<SessionSummary>;
         /// `session/create`: start an agent session. Answers once the agent is ready.
         SessionCreate = "session/create" (SessionCreateParams) -> Session;
@@ -135,6 +135,8 @@ method_table! {
         SessionSetModel = "session/setModel" (SessionSetModelParams) -> Empty;
         /// `session/setAgentMode`: switch the agent's own mode. Returns `{}`.
         SessionSetAgentMode = "session/setAgentMode" (SessionSetAgentModeParams) -> Empty;
+        /// `session/rename`: change the session's title. Returns `{}`.
+        SessionRename = "session/rename" (SessionRenameParams) -> Empty;
         /// `session/stop`: end the agent process and everything it started. Returns `{}`.
         SessionStop = "session/stop" (SessionIdParams) -> Empty;
         /// `session/archive`: stop the session if needed and hide it from default lists.

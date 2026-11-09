@@ -100,6 +100,11 @@ pub enum FromAgent {
         /// The options.
         options: Vec<FakeOption>,
     },
+    /// The fake no longer waits for the answer to a permission request.
+    Withdraw {
+        /// The request's id.
+        id: String,
+    },
     /// Tokens used by the turn.
     Usage {
         /// Input tokens.

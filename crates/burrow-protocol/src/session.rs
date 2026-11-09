@@ -107,7 +107,8 @@ pub struct Session {
     pub mode: SessionMode,
     /// The folder the agent works in.
     pub cwd: String,
-    /// The display name. Set from the first prompt when `session/create` didn't give one.
+    /// The display name. Set from the first prompt when `session/create` didn't give one;
+    /// `session/rename` changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// The current state.
@@ -141,6 +142,19 @@ pub struct Session {
     pub created_at: Timestamp,
     /// When its state, title, model or usage last changed.
     pub updated_at: Timestamp,
+    /// When a turn last started or ended; `createdAt` until the first prompt. `session/list`
+    /// sorts by it, most recent first. `burrowd` always sets it; it is optional only so that
+    /// sessions stored before it existed still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<Timestamp>,
+}
+
+impl Session {
+    /// When a turn last started or ended, or when the session was created if none has: the key
+    /// `session/list` sorts by.
+    pub fn activity(&self) -> Timestamp {
+        self.last_activity_at.unwrap_or(self.created_at)
+    }
 }
 
 /// One of an agent's own modes, such as "ask before edits" or "plan only".
@@ -209,6 +223,10 @@ pub struct SessionSummary {
     pub created_at: Timestamp,
     /// When it last changed.
     pub updated_at: Timestamp,
+    /// When a turn last started or ended; `createdAt` until the first prompt. Lists are sorted
+    /// by it, most recent first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<Timestamp>,
 }
 
 impl From<&Session> for SessionSummary {
@@ -223,6 +241,7 @@ impl From<&Session> for SessionSummary {
             archived: session.archived,
             created_at: session.created_at,
             updated_at: session.updated_at,
+            last_activity_at: Some(session.activity()),
         }
     }
 }
@@ -243,7 +262,8 @@ pub struct SessionListParams {
     /// At most this many. Default 100, at most 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    /// Only sessions created before this one: pass the last id of the previous page.
+    /// Only sessions that come after this one in the list's order (most recent activity
+    /// first): pass the last id of the previous page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
 }
@@ -319,6 +339,17 @@ pub struct SessionSetAgentModeParams {
     pub session_id: String,
     /// The mode's id, one of `Session.agentModes`.
     pub agent_mode: String,
+}
+
+/// `session/rename` params.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameParams {
+    /// The session.
+    pub session_id: String,
+    /// The new display name: not empty, at most 200 characters. Surrounding whitespace is
+    /// trimmed.
+    pub title: String,
 }
 
 // ---- Session events ----------------------------------------------------------------------------

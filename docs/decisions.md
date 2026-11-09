@@ -30,10 +30,12 @@ Every decision that shapes the architecture gets an entry here.
 | [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
 | [D-022](#d-022-msp-types-are-written-by-hand-and-checked-against-muses-schema) | MSP types are written by hand and checked against Muse's schema | 2026-11-09 | accepted |
 | [D-023](#d-023-burrow-runs-muses-versioned-binary-not-its-launcher) | Burrow runs Muse's versioned binary, not its launcher | 2026-11-09 | accepted |
-| [D-024](#d-024-acp-adapters-are-installed-explicitly-and-sessions-start-in-the-mode-that-asks-before-changes) | ACP adapters are installed explicitly, and sessions start in the mode that asks before changes | 2026-11-09 | accepted |
+| [D-024](#d-024-acp-adapters-are-installed-explicitly-and-sessions-start-in-the-mode-that-asks-before-changes) | ACP adapters are installed explicitly, and sessions start in the mode that asks before changes | 2026-11-09 | accepted; D-031 extends its modes to Muse |
 | [D-025](#d-025-a-cancelled-turn-that-doesnt-end-is-ended-by-the-adapter-which-restarts-the-agent-into-the-same-session) | A cancelled turn that doesn't end is ended by the adapter, which restarts the agent into the same session | 2026-11-09 | accepted |
-| [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted |
+| [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted; its inbox item left open when Muse settles an approval itself superseded by D-031 |
 | [D-027](#d-027-muse-sessions-ask-no-user-input-questions-in-m2-and-keep-their-sandbox) | Muse sessions ask no user-input questions in M2, and keep their sandbox | 2026-11-09 | accepted |
+| [D-031](#d-031-muses-approval-modes-are-its-agent-modes-and-an-agent-can-withdraw-a-permission-request) | Muse's approval modes are its agent modes, and an agent can withdraw a permission request | 2026-11-09 | accepted |
+| [D-032](#d-032-models-are-named-by-the-ids-sessions-accept-and-listed-from-the-agents-latest-session) | Models are named by the ids sessions accept, and listed from the agent's latest session | 2026-11-09 | accepted |
 
 ---
 
@@ -610,3 +612,65 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - On a machine whose sandbox setup isn't finished, Muse's shell tool fails in Burrow sessions, with the reason in the tool call's output. `agent/list` says what to run.
 - With a working sandbox, Muse asks only about what it can't sandbox. So Burrow's inbox sees fewer questions from Muse than from the ACP agents.
 - M2's "approve a permission request from the inbox" check for Muse needs `BURROW_MUSE_DISABLE_SANDBOX=1` on `burrowd`, or a command Muse can't sandbox.
+
+## D-031 Muse's approval modes are its agent modes, and an agent can withdraw a permission request
+
+**Decision.**
+- **Muse's modes.** Muse's four approval modes are a Muse session's agent modes (D-024): `promptUnmatched`, `onRequest`, `allowAll` and `denyUnmatched`. `session/setAgentMode` calls Muse's `session/setApprovalMode`, and a mode another client selects (`session/approvalModeChanged`) becomes `agentModeChanged`.
+  - Sessions start in `promptUnmatched`, which Burrow passes to `session/start`. `AgentInfo.defaultAgentMode` reports it.
+- **Withdrawing a permission request.** The adapter interface gains `AgentEvent::PermissionWithdrawn(PermissionId)`, and every `PermissionReply` has an id (`PermissionReply::id`). An adapter sends the event when the agent stops waiting for an answer by itself.
+  - The manager then expires the inbox item at once, with `permissionResolved` and `inboxItemResolved`, both `expired`. The session goes back to `working` once no other request is open, and the turn carries on.
+  - A withdrawal of a request that is no longer open is ignored.
+- **When adapters withdraw:**
+  - **ACP:** on `$/cancel_request` for a `session/request_permission`. Burrow still answers the request `cancelled`, as ACP requires.
+  - **Muse:** on `approval/resolved` for an approval Burrow asked about, whoever settled it (a timeout, a saved rule, another client). Also on a new requirement of the same approval, such as the next stage of a multi-stage command: it withdraws the question about the previous stage.
+  - **The fakes:** their `/withdraw` scripts.
+- This replaces D-026's consequence that Burrow's inbox item stays open when Muse settles an approval by itself.
+
+**Why.**
+- **Modes, as in D-024.** The app's mode picker and `burrowctl session mode` should work for every agent that has modes. A harness that shows each change before it happens should start in the mode that asks.
+  - `promptUnmatched` is Muse's own default, and the only mode that asks before anything Muse's policy doesn't already allow. `onRequest` leaves asking to the model; `allowAll` and `denyUnmatched` never ask.
+  - Passing it to `session/start` makes the starting mode Burrow's choice, not whatever Muse would start in.
+- **Withdrawals.** An item whose answer nobody waits for is a question the user can't usefully answer. Meanwhile the session showed `waiting` while the agent had carried on. Worse, for Muse, answering such an item later decided the approval's next requirement with a choice made for the previous one.
+- **An event, not a closed channel.** An explicit event keeps the withdrawal in order with the session's other events: it comes before the turn's end. The id lets an adapter name a request without knowing inbox item ids, which stay the manager's (D-018).
+
+**Alternatives considered.**
+- **Treat a dropped reply receiver as a withdrawal:** implicit, unordered against the event stream, and Muse's decision task holds its receiver until the approval is settled anyway.
+- **Name requests by tool call id:** one tool call can be asked about more than once, as Muse's stages are.
+- **Mark a request Muse settled elsewhere `resolved`, by the agent:** `resolved` says someone answered through Burrow, and `by` names a device. `expired` says nobody here answered, which is true.
+- **One "permission level" of Burrow's own, mapped per agent:** rejected in D-024, for the same reasons.
+
+**Consequences.**
+- Withdrawn items show as `expired`, like any other item nobody answered.
+- A Muse approval Burrow answered also produces a withdrawal when Muse resolves it; the manager ignores it. If the user answers at the moment Muse times out, the item ends whichever way the session saw first, and Muse's own decision stands.
+- Muse sessions show four agent modes in `Session.agentModes`. `session new --agent-mode allowAll` and `session mode ses_… denyUnmatched` work as for the ACP agents.
+
+## D-032 Models are named by the ids sessions accept, and listed from the agent's latest session
+
+**Decision.**
+- **One namespace.** `AgentInfo.models`, `Session.models`, `session/create`'s `model` and `session/setModel` all use the ids the agent's sessions accept. For an ACP agent those are its model config option's values, such as Cursor's `gpt-5.5[context=272k,reasoning=medium,fast=false]`.
+- **Where `agent/list` gets them.**
+  - Detection reports models only where it can learn the session ids cheaply: Muse, from its echo host's catalog, and the fakes.
+  - For Claude Code, Codex and Cursor, `burrowd` reports the models of the agent's latest session. They are taken from the stored session rows at startup and updated whenever a session starts. Before an agent's first session the list is empty.
+  - Cursor's `agent models` is no longer run.
+- **Names work too.** A model can be named by its display name when exactly one model has it, ignoring case (`burrow_agents::find_model`), so `gpt-5.5` and `auto` work for Cursor.
+  - The manager resolves the name before it calls `set_model`; the ACP adapter resolves it before switching a new session's model.
+  - The session records, and `modelChanged` reports, the id.
+
+**Why.**
+- **The two lists don't match.** A no-prompt probe on 2026-11-09 compared them:
+  - `agent models` listed about 80 ids, such as `gpt-5.3-codex-high-fast`, `claude-opus-5-5-medium` and `auto`.
+  - Cursor's ACP session offered 47 values, one per base model, with its parameters: `gpt-5.3-codex[reasoning=medium,fast=false]`, named `gpt-5.3-codex`, and `default[]`, named `Auto`.
+  - They overlap only in part. Many of the session's models are missing from `agent models`, and its variants (`-high`, `-fast`, `-thinking`, a `cursor-` prefix) map onto the session's parameters by no documented rule.
+- **Only a session knows, and a spare one isn't free.** Asking a session is the only reliable source. But each ACP `session/new` takes about 4 seconds and leaves a record in `~/.cursor/acp-sessions`, so opening one at every detection would litter Cursor's history. Every real session reports its models anyway, so remembering the latest costs nothing.
+- **Names keep the ids usable.** The parameterized ids are long. Display names make them usable by hand and in flows (`cursor/gpt-5.5`), without guessing at Cursor's parameter grammar.
+
+**Alternatives considered.**
+- **Map `agent models` ids onto session values by rule:** there is no documented grammar, and the rule would break on Cursor's next naming change.
+- **A probe session at detection:** leaves a Cursor session behind each time, and costs 4 seconds per detection.
+- **Burrow's own model ids, such as the base names, translated both ways:** hides the agent's real ids, and collides when an agent offers two variants of one base.
+
+**Consequences.**
+- On a fresh install, `agent/list` shows no models for Claude Code, Codex and Cursor until each has run a session. The app's model picker reads `Session.models`, which every session has.
+- A model the agent dropped since its latest session fails `session/create` with `-32602`, naming what the session offers.
+- A name two models share finds neither; use the id.

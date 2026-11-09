@@ -38,7 +38,7 @@ use tracing::{debug, info, warn};
 use super::map;
 use crate::adapter::{
     AgentError, AgentEvent, AgentModes, AgentSession, PermissionOutcome, PermissionReply,
-    PermissionRequest, SessionConfig, StartedSession,
+    PermissionRequest, SessionConfig, StartedSession, find_model,
 };
 use crate::launcher::{self, LaunchSpec, ProcessHandle};
 
@@ -211,13 +211,15 @@ pub async fn start(
         ),
         None => (None, Vec::new()),
     };
-    if let Some(wanted) = config.model.filter(|wanted| model.as_ref() != Some(wanted)) {
-        check_model(name, &models, &wanted)?;
-        client
-            .set_model(&session_id, &wanted)
-            .await
-            .map_err(|error| model_error(name, error))?;
-        model = Some(wanted);
+    if let Some(wanted) = config.model {
+        let wanted = resolve_model(name, &models, wanted)?;
+        if model.as_ref() != Some(&wanted) {
+            client
+                .set_model(&session_id, &wanted)
+                .await
+                .map_err(|error| model_error(name, error))?;
+            model = Some(wanted);
+        }
     }
 
     let (sender, receiver) = mpsc::unbounded_channel();
@@ -348,9 +350,14 @@ fn model_error(name: &str, error: AcpError) -> AgentError {
     }
 }
 
-fn check_model(name: &str, models: &[ModelInfo], wanted: &str) -> Result<(), AgentError> {
-    if models.is_empty() || models.iter().any(|model| model.id == wanted) {
-        return Ok(());
+/// The id of the model `wanted` names, by id or display name ([`find_model`]). When the agent
+/// lists no models, `wanted` is passed on as it is.
+fn resolve_model(name: &str, models: &[ModelInfo], wanted: String) -> Result<String, AgentError> {
+    if models.is_empty() {
+        return Ok(wanted);
+    }
+    if let Some(model) = find_model(models, &wanted) {
+        return Ok(model.id.clone());
     }
     let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
     Err(AgentError::Invalid(format!(
@@ -524,7 +531,8 @@ impl AgentSession for AcpSession {
         Box::pin(async move {
             let name = self.shared.name();
             let conn = self.connection().await?;
-            check_model(name, &self.shared.state().models, &model)?;
+            let models = self.shared.state().models.clone();
+            let model = resolve_model(name, &models, model)?;
             conn.client
                 .set_model(&conn.session_id, &model)
                 .await
@@ -1022,6 +1030,7 @@ fn permission(
         .map(map::permission_option)
         .collect();
     let (reply, answer) = PermissionReply::channel();
+    let permission = reply.id();
     shared.send(AgentEvent::Permission(PermissionRequest {
         tool_call_id: id,
         title,
@@ -1029,6 +1038,7 @@ fn permission(
         reply,
     }));
     let name = shared.name();
+    let events = shared.events.clone();
     tokio::spawn(async move {
         let decision = tokio::select! {
             outcome = answer => match outcome {
@@ -1036,7 +1046,10 @@ fn permission(
                 Ok(PermissionOutcome::Cancelled) | Err(_) => PermissionDecision::Cancelled,
             },
             () = request.withdrawn() => {
+                // `$/cancel_request`: the inbox item expires at once. Dropping `request`
+                // answers it as cancelled, which ACP still expects.
                 debug!(agent = name, "the agent withdrew a permission request");
+                let _ = events.send(AgentEvent::PermissionWithdrawn(permission));
                 return;
             }
         };

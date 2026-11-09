@@ -7,6 +7,7 @@
 > **Implemented so far:**
 > - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
 > - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `agent/install`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
+> - **M3:** `session/rename`, `lastActivityAt` on sessions and on `entityStateChanged`, lists sorted by activity, Muse's approval modes as agent modes, and permission requests the agent withdraws ([revision note](#revision-notes)).
 >
 > `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
@@ -195,15 +196,17 @@ Lists are built from the `index` stream. A client subscribes once and keeps its 
 |---|---|
 | `entityCreated` | `entity, id, title?, projectId?, state?` |
 | `entityRenamed` | `entity, id, title` |
-| `entityStateChanged` | `entity, id, state` |
+| `entityStateChanged` | `entity, id, state, lastActivityAt?` |
 | `entityRemoved` | `entity, id`. The entity left the default lists: a project was removed, or a session or run was archived. |
 | `inboxItemAdded` | `itemId, kind, title, source`. Enough for a list entry or a phone notification. |
 | `inboxItemResolved` | `itemId, status (resolved/expired), action?, by?`. `action` and `by` are absent when the item expired. |
 
 What `burrowd` puts on the index, so far:
 - **Projects:** `entityCreated` (with `title`, the project's name) on `project/add`; `entityRemoved` on `project/remove`.
-- **Sessions:** `entityCreated` (with `title` when given, `projectId`, and `state: "starting"`) on `session/create`; `entityStateChanged` on every state change; `entityRenamed` when the first prompt gives the session its title; `entityRemoved` on `session/archive`.
+- **Sessions:** `entityCreated` (with `title` when given, `projectId`, and `state: "starting"`) on `session/create`; `entityStateChanged` on every state change, and whenever the session's `lastActivityAt` moves; `entityRenamed` when the first prompt gives the session its title, and on `session/rename`; `entityRemoved` on `session/archive`.
 - **Inbox:** `inboxItemAdded` for each permission request; `inboxItemResolved` when it is answered or expires.
+
+**A sidebar from the index alone.** A session's `entityStateChanged` always carries its `lastActivityAt` (when a turn last started or ended), so a list sorted like `session/list` re-sorts without a `session/get`. A turn starting or ending almost always changes the state too; the exception is a turn that ends in `limited`, already `limited` since its `limitReached`, which gets an `entityStateChanged` with the same state and the new `lastActivityAt`. A new session's `lastActivityAt` is its `createdAt`, the `at` of its `entityCreated`.
 
 The summary and the change it summarises are committed together (D-017): a client never sees one without the other.
 
@@ -277,7 +280,7 @@ type AgentInfo = {
   integration: "acp" | "msp" | "terminal" | "fake" | string;   // open enum
   installed: boolean; version?: string; path?: string;
   login: { state: "loggedIn" | "loggedOut" | "unknown" | string; account?: string; detail?: string };
-  models?: { id: string; name?: string }[];  // when cheap to find out
+  models?: { id: string; name?: string }[];  // ids session/create accepts; see below
   available: boolean;                        // session/create can start it now
   problem?: string;                          // why not, or what looks wrong
   adapter?: AdapterInfo;                     // the npm ACP adapter Burrow runs it through, if any
@@ -304,10 +307,11 @@ type RoleConfig = { role: string; candidates: Candidate[]; waitIfResetWithinMinu
 
 How detection works (M2):
 - **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota, and `fake-acp`, a scripted agent that speaks ACP and runs through the same adapter as Claude Code, Codex and Cursor.
-- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout. For Muse they run its versioned binary, and a throwaway `muse serve --provider echo` gives its models and whether its shell sandbox is set up.
+- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login. Each runs in its own Job Object with a 20-second timeout. For Muse they run its versioned binary, and a throwaway `muse serve --provider echo` gives its models and whether its shell sandbox is set up.
+- **`models`** are ids `session/create` and `session/setModel` accept (D-032). Detection gives them where that's cheap: Muse's catalog, the fakes' lists. Claude Code, Codex and Cursor only say which models they offer once a session is open, so for them `models` is what the agent's latest session offered (`Session.models`), remembered from the stored sessions across restarts, and empty until a session has run. Cursor's `agent models` isn't used: it lists ids such as `gpt-5.3-codex-high` that Cursor's ACP sessions don't accept.
 - **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
 - **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. For Claude Code and Codex it is also false while their ACP adapter (`adapter`) isn't installed, or Node.js isn't on `PATH`, and `problem` names the `burrowctl agent install` command. An available agent can have a `problem` too, for something that looks wrong, such as Muse's shell sandbox not being set up.
-- **`defaultAgentMode`** is the [agent mode](#sessions) a session starts in when `session/create` names none: `default` for Claude Code and `read-only` for Codex, both of which ask before edits and commands. Cursor has none and keeps its own default, `agent`, which asks before shell commands but never before file edits (D-024).
+- **`defaultAgentMode`** is the [agent mode](#sessions) a session starts in when `session/create` names none: `default` for Claude Code and `read-only` for Codex, both of which ask before edits and commands, and `promptUnmatched` for Muse, which asks before anything its policy doesn't already allow (D-031). Cursor has none and keeps its own default, `agent`, which asks before shell commands but never before file edits (D-024).
 
 `agent/install` (D-024):
 - **What it installs:** the pinned npm adapter of Claude Code (`@agentclientprotocol/claude-agent-acp` 0.101.0) or Codex (`@agentclientprotocol/codex-acp` 2.6.0), into `%LOCALAPPDATA%\Burrow\agents\<adapter>\<version>` (`burrowd --agents-dir` changes the folder). It takes a few seconds and 400–500 MB, and needs Node.js 22 or later, whose npm it runs. Nothing is ever installed implicitly.
@@ -324,13 +328,14 @@ A session is one conversation with one agent. It is one of two kinds:
 
 | Method | Params → Result |
 |---|---|
-| `session/list` | `{projectId?, state?, includeArchived?, limit?, before?}` → `SessionSummary[]`, newest first |
+| `session/list` | `{projectId?, state?, includeArchived?, limit?, before?}` → `SessionSummary[]`, most recent activity first |
 | `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", agentMode?, cwd?, title?}` → `Session`, once the agent is ready |
 | `session/get` | `{sessionId}` → `Session` |
 | `session/prompt` | `{sessionId, content: ContentBlock[]}` → `{turnId}`. The output arrives as events. |
 | `session/cancel` | `{sessionId}` → `{}`. Stops the current turn; the session stays open. |
 | `session/setModel` | `{sessionId, model}` → `{}` |
 | `session/setAgentMode` | `{sessionId, agentMode}` → `{}`. Switches the agent's own mode, one of `agentModes`. |
+| `session/rename` | `{sessionId, title}` → `{}`. Changes the session's title. |
 | `session/stop` | `{sessionId}` → `{}`. Ends the agent process and everything it started. |
 | `session/archive` | `{sessionId}` → `{}`. Stops the session if needed and hides it from default lists. |
 
@@ -348,9 +353,10 @@ type Session = {
   limit?: { provider: string; resetsAt?: string; message: string };       // while limited
   archived?: boolean;
   createdAt: string; updatedAt: string;
+  lastActivityAt?: string;    // when a turn last started or ended; createdAt until the first prompt
 };
 type SessionSummary = Pick<Session, "id" | "projectId" | "agent" | "model" | "title" | "state"
-                                  | "archived" | "createdAt" | "updatedAt">;
+                                  | "archived" | "createdAt" | "updatedAt" | "lastActivityAt">;
 ```
 
 **Session states** (an open enum): `starting`, `idle`, `working`, `waiting` (on a human), `limited` (a provider limit was hit), `stopped`, `failed`.
@@ -381,17 +387,20 @@ Settled in M2:
   - `cwd` defaults to the project's folder. Without a `projectId`, `cwd` is required. It must be an existing folder (`-32602`).
   - `mode: "terminal"` is `unavailable` until M4. An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable` too, and so is Claude Code or Codex before `agent/install`; a failed start leaves the session `failed`.
   - `model` must be one the agent offers, else `-32602`, and the session ends `failed`.
+- **Models** (D-032) are named by their id, or by their `name` when exactly one model has it, ignoring case: Cursor's `gpt-5.5` is its `gpt-5.5[context=272k,reasoning=medium,fast=false]`, and `auto` its `default[]`. That holds for `session/create`'s `model` and for `session/setModel`; the session records, and `modelChanged` reports, the id.
 - **Agent modes** (D-024) are the agent's own, for example Claude Code's `default`, `acceptEdits`, `plan`, `auto` and `bypassPermissions`, or Codex's `read-only`, `workspace-write`, `agent` and `agent-full-access`. They decide what the agent asks permission for. `mode` was taken: it says structured or terminal.
+  - Muse's agent modes are its approval modes (D-031): `promptUnmatched` (ask before anything its policy doesn't already allow; the default), `onRequest` (ask only when the model asks), `allowAll` and `denyUnmatched` (refuse, without asking, anything not already allowed). A mode another Muse client selects arrives as `agentModeChanged`.
   - A session starts in `agentMode` when `session/create` gives one, else in the agent's `defaultAgentMode`, else in the agent's own default. A mode the agent doesn't offer is `-32602`, and the session ends `failed`.
   - `session/setAgentMode` switches later; an unknown mode is `-32602`. Every change is recorded with `agentModeChanged`, including the ones the agent makes by itself, such as Claude Code leaving `plan` mode.
   - Agents without modes have no `agentMode`; `session/setAgentMode` on them is `-32602`.
 - **`session/prompt`** starts a turn and answers with its id. Only one turn runs at a time: prompting while one runs is `invalidState`, and so is prompting a `stopped` or `failed` session. Prompting a `limited` session whose `resetsAt` is still ahead is `limitReached` (-32005) with `data.resetsAt`; without a known reset time the prompt is tried.
-- **Titles.** A session created without a `title` takes the first line of its first prompt, cut to 60 characters, and announces it with `entityRenamed`.
+- **Titles.** A session created without a `title` takes the first line of its first prompt, cut to 60 characters, and announces it with `entityRenamed`. `session/rename` sets another, on any session, live or not: trimmed, not empty and at most 200 characters (`-32602` otherwise), announced with `entityRenamed`. Renaming to the current title does nothing.
+- **Activity.** `lastActivityAt` is when a turn last started or ended, including a turn ended by a stop or a restart; a new session's is its `createdAt`.
 - **`session/cancel`** asks the agent to stop the turn, and expires its open permission requests at once. The turn still ends with `turnEnded` (`cancelled`). With no turn running it does nothing. An ACP agent that hasn't ended the turn 10 seconds later gets its turn ended for it, `cancelled` with a `message` saying so, and is restarted into the same conversation; prompts wait for the restart (D-025).
 - **`session/setModel`** asks the agent to switch; once it agrees, `modelChanged` follows.
 - **`session/stop`** answers once the agent's whole process tree is gone (D-018). A running turn ends with `turnEnded` (`cancelled`), open permission requests expire, and the session is `stopped` with reason `stopped by request`. Stopping a stopped session does nothing.
 - **`session/archive`** stops the session if needed, sets `archived`, and puts `entityRemoved` on the index. `session/list` leaves archived sessions out unless `includeArchived` is set.
-- **Lists** are newest first. `before` takes the last id of the previous page; ids sort by creation. `limit` defaults to 100, at most 1000.
+- **Lists** are sorted by `lastActivityAt`, most recent first, then by id, newest first. `before` takes the last id of the previous page, and the next page goes on after that session in the same order; an id that isn't a session is `-32602`. A session whose activity moves between two pages can show up on both, or neither; a client that follows the `index` sees it anyway. `limit` defaults to 100, at most 1000.
 - **Restarts.** Agent processes run in Job Objects, so they die with `burrowd`. When `burrowd` starts, every session that was live is marked `stopped` (reason: `burrowd stopped, and the agent process ended with it`): a running turn gets `turnEnded` (`error`), open permission requests expire, then `stateChanged`, all before any client can connect. A clean shutdown (Ctrl+C) stops each session the same way, with reason `burrowd shut down`.
 
 #### Session events
@@ -420,7 +429,8 @@ Session event types deliberately mirror ACP's `session/update` kinds, so the ACP
 - **Tool call content** is `{type: "content", content: ContentBlock}`, `{type: "diff", path, oldText?, newText}` or `{type: "terminal", terminalId}`.
 - **Turns.** Every event of a turn comes after its `userMessage` and before its `turnEnded`. Agent text outside a turn is dropped.
 - **Text is stored in chunks of about 100 ms.** `burrowd` buffers a turn's message or thought text and commits it when 100 ms have passed since the first piece, when 16 KiB have built up, or when anything else happens in the session, so the order of events is kept. A client appends consecutive chunks.
-- **`permissionResolved`** says how a `permissionRequested` ended: answered through `inbox/respond`, or expired because the turn was cancelled or ended, the session stopped, or `burrowd` restarted.
+- **`permissionResolved`** says how a `permissionRequested` ended: answered through `inbox/respond`, or expired because the turn was cancelled or ended, the session stopped, `burrowd` restarted, or the agent withdrew the request.
+- **Withdrawn requests** (D-031): when the agent stops waiting for an answer by itself (ACP's `$/cancel_request`, or an approval Muse settles itself, through a timeout or another client), the request expires at once: `permissionResolved` and `inboxItemResolved`, both `expired`, then `stateChanged` back to `working` once no other request is open. The turn carries on.
 - **`stateChanged`** follows the events that caused it, in the same commit: `userMessage` then `working`, `permissionRequested` then `waiting`, `turnEnded` then `idle`.
 
 A turn with a permission request, as a client sees it:
@@ -554,7 +564,7 @@ Settled in M2, where the only items are agent permission requests:
 - **A permission request** becomes an item of kind `permission`. Its `title` is the agent's description of the tool call, its `source` names the session and the tool call, and its `actions` are the agent's options: `id` is the `optionId`, `allowOnce` options are `primary` and reject options `danger`.
 - **`inbox/respond`** resolves an open item and passes the answer to the agent; `permissionResolved` and `inboxItemResolved` follow. `action` must be one of the item's action ids (`-32602` otherwise). `by` is `local` for local connections.
 - **Only open items can be answered.** An item that was answered, or expired, gets `conflict`, whichever device got there first.
-- **Items expire** when their turn is cancelled or ends, when their session stops, or when `burrowd` restarts. Nobody answered them; `resolution` stays absent and `closedAt` says when.
+- **Items expire** when their turn is cancelled or ends, when their session stops, when `burrowd` restarts, or when the agent withdraws the request. Nobody answered them; `resolution` stays absent and `closedAt` says when.
 
 ### Artifacts
 
@@ -711,6 +721,14 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **Cancels the agent ignores:** the turn is ended for it and the agent restarted (D-025).
 - **Tool kinds:** `switchMode` joined the known values.
 - **`fake-acp`** exists with `--dev`.
+
+**2026-11-09, the backend for M3's desktop app.** Additive, for the app's sidebar, mode picker and inbox; the schema is regenerated:
+- **`session/rename {sessionId, title}`** → `{}`, announced with `entityRenamed`.
+- **`lastActivityAt`** on `Session` and `SessionSummary`: when a turn last started or ended. `session/list` is sorted by it, most recent first, where it was newest first; `before` pages in that order, and an unknown `before` is `-32602`.
+- **`entityStateChanged` gained `lastActivityAt?`,** always present for sessions, and also comes when only the activity moved. A new index event was considered and not needed: every turn start and end but one changes the state anyway.
+- **Muse's approval modes** are its agent modes, starting in `promptUnmatched`; `AgentInfo.defaultAgentMode` says so (D-031).
+- **Withdrawn permission requests** expire at once, with `permissionResolved` and `inboxItemResolved` (`expired`), and the session goes back to `working` (D-031).
+- **Models:** `AgentInfo.models` are ids sessions accept, from the agent's latest session where detection can't tell; a model can be named by its `name` (D-032). Cursor's `agent models` is no longer read.
 
 ## Open questions
 

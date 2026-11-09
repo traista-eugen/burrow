@@ -1,10 +1,16 @@
-//! Agents: the adapter registry, cached detection results, and provider usage.
+//! Agents: the adapter registry, cached detection results, the models sessions offered, and
+//! provider usage.
+//!
+//! `AgentInfo.models` are ids `session/create` accepts. Detection finds them where that's cheap
+//! and the ids match a session's (Muse, the fakes). For the others, the models of the agent's
+//! latest session are reported: an ACP agent only says which models it offers once a session
+//! is open, and Cursor's `agent models` lists ids its sessions don't accept (D-032).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use burrow_agents::{AgentError, Registry};
-use burrow_protocol::{AgentId, AgentInfo, ErrorKind, ErrorObject, ProviderUsage};
+use burrow_protocol::{AgentId, AgentInfo, ErrorKind, ErrorObject, ModelInfo, ProviderUsage};
 use tracing::{info, warn};
 
 /// The agents `burrowd` offers, what was last detected about them, and the usage they reported.
@@ -14,7 +20,13 @@ pub struct Agents {
     /// The last detection. `None` until the first one finishes. Held while detecting, so
     /// concurrent callers share one detection.
     detected: tokio::sync::Mutex<Option<Vec<AgentInfo>>>,
+    /// The models each agent's latest session offered, by agent id.
+    learned: Mutex<BTreeMap<String, Vec<ModelInfo>>>,
     usage: Mutex<BTreeMap<String, ProviderUsage>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Agents {
@@ -23,8 +35,31 @@ impl Agents {
         Self {
             registry,
             detected: tokio::sync::Mutex::new(None),
+            learned: Mutex::new(BTreeMap::new()),
             usage: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Records the models a session of `agent` offers, for `agent/list` (D-032).
+    pub fn learn_models(&self, agent: &AgentId, models: Vec<ModelInfo>) {
+        lock(&self.learned).insert(agent.to_string(), models);
+    }
+
+    /// `info` with the learned models when detection found none.
+    fn with_models(&self, mut info: AgentInfo) -> AgentInfo {
+        if info.models.is_empty()
+            && let Some(models) = lock(&self.learned).get(info.id.as_str())
+        {
+            info.models.clone_from(models);
+        }
+        info
+    }
+
+    fn all_with_models(&self, agents: Vec<AgentInfo>) -> Vec<AgentInfo> {
+        agents
+            .into_iter()
+            .map(|info| self.with_models(info))
+            .collect()
     }
 
     /// The adapters.
@@ -44,11 +79,11 @@ impl Agents {
     pub async fn list(&self) -> Vec<AgentInfo> {
         let mut detected = self.detected.lock().await;
         if let Some(agents) = detected.as_ref() {
-            return agents.clone();
+            return self.all_with_models(agents.clone());
         }
         let agents = self.detect().await;
         *detected = Some(agents.clone());
-        agents
+        self.all_with_models(agents)
     }
 
     /// Detects every agent again.
@@ -56,7 +91,7 @@ impl Agents {
         let mut detected = self.detected.lock().await;
         let agents = self.detect().await;
         *detected = Some(agents.clone());
-        agents
+        self.all_with_models(agents)
     }
 
     /// `agent/install`: installs what `agent` needs, such as its pinned ACP adapter, then
@@ -93,7 +128,7 @@ impl Agents {
             *cached = info.clone();
         }
         info!(agent = %agent, available = info.available, "installed");
-        Ok(info)
+        Ok(self.with_models(info))
     }
 
     async fn detect(&self) -> Vec<AgentInfo> {
@@ -114,19 +149,11 @@ impl Agents {
 
     /// Records a provider's usage, replacing what it reported before.
     pub fn report_usage(&self, usage: ProviderUsage) {
-        self.usage
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(usage.provider.clone(), usage);
+        lock(&self.usage).insert(usage.provider.clone(), usage);
     }
 
     /// Every provider's last reported usage, by provider name.
     pub fn usage(&self) -> Vec<ProviderUsage> {
-        self.usage
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .cloned()
-            .collect()
+        lock(&self.usage).values().cloned().collect()
     }
 }

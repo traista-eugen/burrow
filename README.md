@@ -58,6 +58,7 @@ The fake echoes your prompt, streaming it back word by word. Some prompts are sc
 | Prompt | What the fake does |
 |---|---|
 | `/permission` | Asks to edit a file, and waits for your answer in the inbox |
+| `/withdraw` | Asks, then withdraws the question after 200 ms, as an agent whose question timed out does; the inbox item expires at once |
 | `/limit` | Hits a simulated usage limit; the session becomes `limited` for an hour |
 | `/slow` | Streams for 10 seconds, so you can try `session cancel` |
 | `/plan` | Shows a plan |
@@ -70,7 +71,7 @@ cargo run -p burrowctl -- inbox list                                  # terminal
 cargo run -p burrowctl -- inbox respond inb_… allow                   # terminal 1 carries on
 ```
 
-`session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents.
+`session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. A session takes its title from the first line of its first prompt; `session rename ses_… "New title"` changes it, and `session list` shows the most recently active sessions first. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents.
 
 `fake-acp` is the same idea speaking real ACP, so it runs through the same adapter as Claude Code, Codex and Cursor. Its scripts are listed in `crates/burrow-agents/src/acp/fake_agent.rs`; `/hang` shows what happens when an agent ignores a cancel.
 
@@ -88,7 +89,11 @@ cargo run -p burrowctl -- session new --agent claude --cwd D:\scratch
 cargo run -p burrowctl -- session prompt ses_… "Reply with exactly: OK" --watch
 ```
 
-Sessions start in the agent's mode that asks before changes: `default` for Claude Code, `read-only` for Codex. Cursor keeps its own `agent` mode, which asks before shell commands but never before file edits. Choose another mode with `session new --agent-mode <mode>`, or switch with `session mode ses_… <mode>`; `session new` prints the modes the agent offers. A permission request waits in the inbox like the fake's:
+Sessions start in the agent's mode that asks before changes: `default` for Claude Code, `read-only` for Codex. Cursor keeps its own `agent` mode, which asks before shell commands but never before file edits. Choose another mode with `session new --agent-mode <mode>`, or switch with `session mode ses_… <mode>`; `session new` prints the modes the agent offers.
+
+Choose a model with `session new --model <model>`, or switch with `session model ses_… <model>`. A model can be named by its id or by its name: Cursor's `gpt-5.5` is its `gpt-5.5[context=272k,reasoning=medium,fast=false]`. Once an agent has run a session, `agent list` shows the models that session offered (D-032).
+
+A permission request waits in the inbox like the fake's:
 
 ```powershell
 cargo run -p burrowctl -- session prompt ses_… "Create hello.txt containing hi" --watch   # terminal 2: waits
@@ -109,9 +114,11 @@ cargo run -p burrowctl -- session new --agent muse --cwd C:\path\to\a\folder   #
 cargo run -p burrowctl -- session prompt ses_… "Hello, Muse" --watch
 ```
 
-Muse asks before tool calls it can't sandbox. Its questions arrive in the inbox, like the fake's (`inbox list`, `inbox respond inb_… allow_once`).
+Muse asks before tool calls it can't sandbox. Its questions arrive in the inbox, like the fake's (`inbox list`, `inbox respond inb_… allow_once`). If Muse settles a question itself, for example when it times out, the inbox item expires at once.
 
-**Muse's shell tool needs its Windows sandbox.** Until you run `muse sandbox windows setup` in an elevated terminal, Muse's shell commands fail; its other tools work. `agent list --json` reports it as Muse's `problem`. Burrow never turns the sandbox off for you. To see an approval anyway, start `burrowd` with `$env:BURROW_MUSE_DISABLE_SANDBOX = "1"`: Muse then asks before every shell command it doesn't already allow (D-027).
+Muse's approval modes are its agent modes: sessions start in `promptUnmatched`, which asks before anything Muse's policy doesn't already allow. `session mode ses_… allowAll` (or `onRequest`, `denyUnmatched`) switches, as for the ACP agents (D-031).
+
+**Muse's shell tool needs its Windows sandbox.** Until you run `muse sandbox windows setup` in an elevated terminal, Muse's shell commands fail; its other tools work. `agent list` reports it as Muse's `problem`. Burrow never turns the sandbox off for you. To see an approval anyway, start `burrowd` with `$env:BURROW_MUSE_DISABLE_SANDBOX = "1"`: Muse then asks before every shell command it doesn't already allow (D-027).
 
 ### Notes
 

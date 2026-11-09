@@ -18,7 +18,11 @@
 //!   prompt that succeeds ends with exactly one [`AgentEvent::TurnEnded`], also after `cancel`
 //!   (reason `cancelled`). Events that belong to the turn come before it.
 //! - **Permissions.** Send [`AgentEvent::Permission`] and wait for its [`PermissionReply`]. If
-//!   the reply is dropped unanswered, treat it as [`PermissionOutcome::Cancelled`].
+//!   the reply is dropped unanswered, treat it as [`PermissionOutcome::Cancelled`]. When the
+//!   agent stops waiting for an answer by itself (ACP's `$/cancel_request`, an approval Muse
+//!   settled, a timeout), send [`AgentEvent::PermissionWithdrawn`] with the reply's
+//!   [`PermissionReply::id`], so the question leaves the inbox at once. Withdrawing a request
+//!   that was answered meanwhile is harmless; the manager ignores it.
 //! - **Limits.** When the provider reports a usage limit, send [`AgentEvent::LimitReached`],
 //!   with `resets_at` when known, then end the turn with reason `limit`. Report usage figures
 //!   with [`AgentEvent::Usage`] (per turn) and [`AgentEvent::ProviderUsage`] (allowances).
@@ -28,9 +32,12 @@
 //! - **Exit.** When the agent process ends, send [`AgentEvent::Exited`] last, then close the
 //!   channel. `error` is `None` only when [`AgentSession::stop`] asked for it.
 //! - **Modes.** An agent with modes of its own (ACP session modes, such as Claude Code's
-//!   `default` or Codex's `read-only`) reports them with [`AgentSession::agent_modes`] and starts
-//!   in the mode that asks before changes. The manager switches to the mode `session/create`
-//!   asked for with [`AgentSession::set_agent_mode`].
+//!   `default` or Codex's `read-only`, or Muse's approval modes) reports them with
+//!   [`AgentSession::agent_modes`] and starts in the mode that asks before changes. The manager
+//!   switches to the mode `session/create` asked for with [`AgentSession::set_agent_mode`].
+//! - **Models.** A requested model may name a model by its id or by its display name
+//!   ([`find_model`]); resolve it before passing it on, and report the id in
+//!   [`StartedSession::model`].
 //! - **Installing.** An agent that needs something Burrow installs, such as a pinned npm
 //!   adapter, does it in [`AgentAdapter::install`], never as a side effect of `start`.
 //! - **Never block on the event channel.** It is unbounded; nothing the manager does waits for
@@ -38,6 +45,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use burrow_protocol::{
     AgentId, AgentInfo, AgentMode, ContentBlock, Integration, ModelInfo, PermissionOption, Plan,
@@ -182,6 +190,9 @@ pub enum AgentEvent {
     Plan(Plan),
     /// The agent asks before a tool call. Becomes an inbox item.
     Permission(PermissionRequest),
+    /// The agent no longer waits for the answer to an open permission request, for example
+    /// because it timed out or someone answered it elsewhere. Its inbox item expires at once.
+    PermissionWithdrawn(PermissionId),
     /// The running turn is over.
     TurnEnded {
         /// Why.
@@ -247,18 +258,95 @@ pub enum PermissionOutcome {
 /// Sends the answer to one permission request. Dropping it unanswered means
 /// [`PermissionOutcome::Cancelled`].
 #[derive(Debug)]
-pub struct PermissionReply(oneshot::Sender<PermissionOutcome>);
+pub struct PermissionReply {
+    id: PermissionId,
+    sender: oneshot::Sender<PermissionOutcome>,
+}
 
 impl PermissionReply {
     /// A reply and the receiver the adapter waits on.
     pub fn channel() -> (Self, oneshot::Receiver<PermissionOutcome>) {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
         let (sender, receiver) = oneshot::channel();
-        (Self(sender), receiver)
+        let id = PermissionId(NEXT.fetch_add(1, Ordering::Relaxed));
+        (Self { id, sender }, receiver)
+    }
+
+    /// The request's id, unique within the process: what [`AgentEvent::PermissionWithdrawn`]
+    /// names.
+    pub fn id(&self) -> PermissionId {
+        self.id
     }
 
     /// Sends the answer. Does nothing if the adapter stopped waiting.
     pub fn send(self, outcome: PermissionOutcome) {
-        let _ = self.0.send(outcome);
+        let _ = self.sender.send(outcome);
+    }
+}
+
+/// Names one permission request, so an adapter can withdraw it
+/// ([`AgentEvent::PermissionWithdrawn`]). Opaque; unique within the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PermissionId(u64);
+
+impl fmt::Display for PermissionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "permission {}", self.0)
+    }
+}
+
+/// The model `wanted` names among `models`: the one whose id it is, or else the only one whose
+/// display name it is, ignoring case. So `gpt-5.5` finds Cursor's
+/// `gpt-5.5[context=272k,reasoning=medium,fast=false]` (named `gpt-5.5`), and `auto` its
+/// `default[]` (named `Auto`). `None` when it names none, or more than one by name.
+pub fn find_model<'a>(models: &'a [ModelInfo], wanted: &str) -> Option<&'a ModelInfo> {
+    if let Some(model) = models.iter().find(|model| model.id == wanted) {
+        return Some(model);
+    }
+    let mut named = models.iter().filter(|model| {
+        model
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+    });
+    let first = named.next()?;
+    named.next().is_none().then_some(first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(id: &str, name: Option<&str>) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            name: name.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn models_are_found_by_id_or_by_a_unique_name() {
+        let models = [
+            model("default[]", Some("Auto")),
+            model("gpt-5.5[context=272k]", Some("gpt-5.5")),
+            model("a[x]", Some("twin")),
+            model("a[y]", Some("twin")),
+            model("plain", None),
+        ];
+        let id = |wanted| find_model(&models, wanted).map(|model| model.id.as_str());
+        assert_eq!(id("gpt-5.5[context=272k]"), Some("gpt-5.5[context=272k]"));
+        assert_eq!(id("gpt-5.5"), Some("gpt-5.5[context=272k]"));
+        assert_eq!(id("auto"), Some("default[]"));
+        assert_eq!(id("plain"), Some("plain"));
+        assert_eq!(id("twin"), None, "ambiguous names find nothing");
+        assert_eq!(id("gpt-5.4"), None);
+    }
+
+    #[test]
+    fn every_reply_has_its_own_id() {
+        let (first, _) = PermissionReply::channel();
+        let (second, _) = PermissionReply::channel();
+        assert_ne!(first.id(), second.id());
     }
 }
 

@@ -67,7 +67,7 @@ Every milestone ends with something you can run.
 - The pinned ACP adapters for Claude Code and Codex, installed by `burrowctl agent install claude|codex` into `%LOCALAPPDATA%\Burrow\agents` (D-024).
 
 **Work:**
-- [x] **Agent detection** (`agent/list`, `agent/refresh`): versions, login state, and models where cheap (Cursor's). Read-only commands, run in Job Objects, cached (D-018).
+- [x] **Agent detection** (`agent/list`, `agent/refresh`): versions, login state, and models where cheap (Cursor's; replaced in M3 by the models of the agent's latest session, D-032). Read-only commands, run in Job Objects, cached (D-018).
 - [x] **ACP adapter** (`burrow_agents::acp`) on the `burrow-acp` client (D-020, D-021):
   - [x] Cursor: `agent acp`
   - [x] Claude Code: `@agentclientprotocol/claude-agent-acp`
@@ -110,6 +110,13 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
   - a prompt box.
 - [ ] **Model picker and session state indicators.**
 - [ ] **Startup time and memory checks:** target cold start under 300 ms to the first frame.
+- [x] **The backend for the app** (additive protocol changes; see protocol.md's revision notes):
+  - [x] **The sidebar:** sessions take their title from the first prompt, and `session/rename` changes it. `lastActivityAt` on `Session` and `SessionSummary` says when a turn last started or ended, and `session/list` returns the most recently active first. Every state or activity change is on the `index` as `entityStateChanged` with `lastActivityAt`, so the sidebar re-sorts without a `session/get`.
+  - [x] **The mode picker:** Muse's approval modes are its agent modes, starting in `promptUnmatched` (D-031), so `session/setAgentMode` works for all four agents' modes. Cursor has modes but keeps its own default (D-024).
+  - [x] **The inbox:** a permission request the agent withdraws expires at once, and the session goes back to `working`: ACP's `$/cancel_request`, and approvals Muse settles itself (D-031).
+  - [x] **The model picker:** models are named by the ids sessions accept. `agent/list` reports the latest session's models where detection can't tell, and a model's name works in place of its id (D-032).
+  - Tested with the fake agents (`/withdraw`, a parameterized `fake-param` model), a recorded Muse transcript, and Muse's echo provider.
+- [x] **M2's follow-ups:** Muse's approval modes as agent modes; withdrawn permission requests; Cursor's model ids (`agent models` listed ids its sessions refuse); `burrowctl agent list` showing an available agent's `problem`, such as Muse's sandbox note.
 
 **Done when** you prefer Burrow over the agents' own TUIs for everyday chats.
 

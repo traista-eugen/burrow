@@ -6,6 +6,7 @@
 //! burrowctl agent install claude
 //! burrowctl session new --agent fake
 //! burrowctl session prompt ses_… "Hello" --watch
+//! burrowctl session rename ses_… "Fix the login bug"
 //! burrowctl inbox respond inb_… allow
 //! burrowctl events tail index --after 0
 //! ```
@@ -23,13 +24,14 @@ use burrow_client::{CallError, Client, ConnectError, ConnectOptions};
 use burrow_protocol::methods::{
     AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxList, InboxRespond, Ping, ProjectAdd,
     ProjectList, SessionArchive, SessionCancel, SessionCreate, SessionList, SessionPrompt,
-    SessionSetAgentMode, SessionSetModel, SessionStop, UsageGet,
+    SessionRename, SessionSetAgentMode, SessionSetModel, SessionStop, UsageGet,
 };
 use burrow_protocol::{
     AgentId, AgentInstallParams, ClientInfo, ClientKind, ContentBlock, DebugAppendParams, Empty,
     Event, InboxItemStatus, InboxListParams, InboxRespondParams, ProjectAddParams,
     SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
-    SessionSetAgentModeParams, SessionSetModelParams, StreamName, SubscribeParams, code,
+    SessionRenameParams, SessionSetAgentModeParams, SessionSetModelParams, StreamName,
+    SubscribeParams, code,
 };
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -116,7 +118,8 @@ enum SessionCommand {
         /// The agent: claude, codex, cursor, muse, or fake and fake-acp (with burrowd --dev)
         #[arg(long)]
         agent: String,
-        /// The model; the agent's default without it
+        /// The model, by id or name; the agent's default without it. `agent list` shows the
+        /// models of the agent's latest session
         #[arg(long)]
         model: Option<String>,
         /// The agent's own mode, for example `read-only` for Codex [default: the mode that asks
@@ -134,7 +137,7 @@ enum SessionCommand {
         #[arg(long)]
         title: Option<String>,
     },
-    /// List sessions, newest first
+    /// List sessions, most recently active first
     List {
         /// Include archived sessions
         #[arg(long)]
@@ -167,8 +170,15 @@ enum SessionCommand {
     Model {
         /// The session
         id: String,
-        /// The model
+        /// The model: its id, or its name, such as `gpt-5.5` for Cursor
         model: String,
+    },
+    /// Change the session's title
+    Rename {
+        /// The session
+        id: String,
+        /// The new title
+        title: String,
     },
     /// Switch the agent's own mode, which decides what it asks permission for
     Mode {
@@ -475,6 +485,16 @@ impl Ctl {
                     SessionSetModelParams {
                         session_id: id,
                         model,
+                    },
+                )
+                .await
+            }
+            SessionCommand::Rename { id, title } => {
+                call_empty::<SessionRename>(
+                    &client,
+                    SessionRenameParams {
+                        session_id: id,
+                        title,
                     },
                 )
                 .await
@@ -800,6 +820,22 @@ mod tests {
             panic!("parsed the wrong command");
         };
         assert_eq!(agent_mode.as_deref(), Some("read-only"));
+
+        let cli = Cli::try_parse_from([
+            "burrowctl",
+            "session",
+            "rename",
+            "ses_1",
+            "Fix the login bug",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::Rename { id, title }) = cli.command else {
+            panic!("parsed the wrong command");
+        };
+        assert_eq!(
+            (id.as_str(), title.as_str()),
+            ("ses_1", "Fix the login bug")
+        );
 
         let cli = Cli::try_parse_from(["burrowctl", "agent", "install", "claude"]).unwrap();
         assert!(matches!(
