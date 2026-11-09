@@ -100,10 +100,10 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
 
 ## M3: Desktop app v1
 
-- [ ] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running. The client's I/O runs on `burrow_client::io_runtime()`, since GPUI doesn't run tokio (D-016).
-- [ ] **Decide on `gpui-component`** (now 0.9.0) versus our own widgets. Record the decision in `decisions.md`.
-- [ ] **Layout:** a sidebar with projects, sessions and runs (runs are empty for now), and an inbox panel.
-- [ ] **Session view:**
+- [x] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running. The client's I/O runs on `burrow_client::io_runtime()`, since GPUI doesn't run tokio (D-016). Reconnects resume every stream (D-029).
+- [x] **Decide on `gpui-component`:** adopted, 0.9.1 on `gpui-pre` 0.3.12, with GPUI's manifest (D-028).
+- [x] **Layout:** a sidebar with projects, sessions and runs (runs are empty for now), and an inbox panel (D-030).
+- [ ] **Session view** (partial: a basic transcript, permission buttons, a prompt box and a state indicator are in; the items below are next):
   - a virtualized transcript;
   - markdown that renders while it streams;
   - tool calls and diffs;

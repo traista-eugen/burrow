@@ -16,7 +16,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-007](#d-007-custom-code-runs-in-separate-processes-in-any-language) | Custom code runs in separate processes, in any language | 2026-11-06 | accepted |
 | [D-008](#d-008-remote-access-v1-runs-over-tailscalewireguard-with-per-device-keys) | Remote access v1 runs over Tailscale/WireGuard with per-device keys | 2026-11-05 | accepted |
 | [D-009](#d-009-agents-act-on-github-through-a-github-app) | Agents act on GitHub through a GitHub App | 2026-11-05 | accepted |
-| [D-010](#d-010-burrow-ships-its-own-windows-manifest) | Burrow ships its own Windows manifest | 2026-11-05 | accepted |
+| [D-010](#d-010-burrow-ships-its-own-windows-manifest) | Burrow ships its own Windows manifest | 2026-11-05 | superseded by D-028 |
 | [D-011](#d-011-protocol-types-typed-method-markers-millisecond-timestamps-open-enums) | Protocol types: typed method markers, millisecond timestamps, open enums | 2026-11-09 | accepted |
 | [D-012](#d-012-the-event-store-syncs-every-commit-to-disk) | The event store syncs every commit to disk | 2026-11-09 | accepted |
 | [D-013](#d-013-a-small-crate-holds-the-local-transport) | A small crate holds the local transport | 2026-11-09 | accepted |
@@ -34,6 +34,9 @@ Every decision that shapes the architecture gets an entry here.
 | [D-025](#d-025-a-cancelled-turn-that-doesnt-end-is-ended-by-the-adapter-which-restarts-the-agent-into-the-same-session) | A cancelled turn that doesn't end is ended by the adapter, which restarts the agent into the same session | 2026-11-09 | accepted |
 | [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted; its inbox item left open when Muse settles an approval itself superseded by D-031 |
 | [D-027](#d-027-muse-sessions-ask-no-user-input-questions-in-m2-and-keep-their-sandbox) | Muse sessions ask no user-input questions in M2, and keep their sandbox | 2026-11-09 | accepted |
+| [D-028](#d-028-the-desktop-app-uses-gpui-component-on-the-gpui-pre-snapshot-and-gpuis-windows-manifest) | The desktop app uses gpui-component on the `gpui-pre` snapshot, and GPUI's Windows manifest | 2026-11-09 | accepted; replaces D-010 |
+| [D-029](#d-029-the-app-starts-burrowd-itself-detached-and-every-stream-resumes-after-a-reconnect) | The app starts `burrowd` itself, detached, and every stream resumes after a reconnect | 2026-11-09 | accepted |
+| [D-030](#d-030-the-desktop-app-keeps-plain-models-under-gpui-entities-and-splits-the-session-view-into-header-transcript-and-prompt) | The desktop app keeps plain models under GPUI entities, and splits the session view into header, transcript and prompt | 2026-11-09 | accepted |
 | [D-031](#d-031-muses-approval-modes-are-its-agent-modes-and-an-agent-can-withdraw-a-permission-request) | Muse's approval modes are its agent modes, and an agent can withdraw a permission request | 2026-11-09 | accepted |
 | [D-032](#d-032-models-are-named-by-the-ids-sessions-accept-and-listed-from-the-agents-latest-session) | Models are named by the ids sessions accept, and listed from the agent's latest session | 2026-11-09 | accepted |
 
@@ -180,6 +183,8 @@ Rust plugins are never loaded into `burrowd` itself.
 **Consequences.** Setup includes creating and installing a GitHub App. This needs a guide in the docs.
 
 ## D-010 Burrow ships its own Windows manifest
+
+> **Superseded by D-028:** `burrow.exe` now carries GPUI's manifest.
 
 **Decision.** `burrow-app` embeds its own manifest:
 - per-monitor DPI awareness (PerMonitorV2);
@@ -612,6 +617,46 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - On a machine whose sandbox setup isn't finished, Muse's shell tool fails in Burrow sessions, with the reason in the tool call's output. `agent/list` says what to run.
 - With a working sandbox, Muse asks only about what it can't sandbox. So Burrow's inbox sees fewer questions from Muse than from the ACP agents.
 - M2's "approve a permission request from the inbox" check for Muse needs `BURROW_MUSE_DISABLE_SANDBOX=1` on `burrowd`, or a command Muse can't sandbox.
+
+## D-028 The desktop app uses gpui-component on the `gpui-pre` snapshot, and GPUI's Windows manifest
+
+**Decision.**
+- `burrow-app` uses gpui-component 0.9.1 (GPUI Kit, Apache-2.0) for text input, markdown, buttons, notifications, themes and icons. It builds on `gpui-pre` 0.3.12, a snapshot of Zed's GPUI (zed@d2a4fb6), which replaces `gpui` 0.2.2. The app also uses `gpui-pre-platform` (`gpui_platform`) to create the `Application`, and `gpui-kit-assets` for the Lucide icons.
+- All four are pinned with `=` in the root `Cargo.toml` and upgraded together. Code keeps the name `gpui` (`package = "gpui-pre"`).
+- `burrow.exe` carries GPUI's Windows manifest, not its own; this replaces D-010. The resource script holds only the icon. GPUI's manifest gives PerMonitorV2 DPI awareness, Common Controls v6, the Windows 10 `supportedOS` entry, the segment heap and `asInvoker`. Lost from D-010's: long paths and UTF-8 as the active code page.
+
+**Why.**
+- The spike (2026-11-09, MSVC, Windows SDK 10.0.26100): it builds with the existing toolchain. A release build shows its first frame 96–130 ms after `main`, with streaming markdown and a text area on screen (target: 300 ms); the binary is 21.3 MB and the window uses about 54 MB. `TextViewState::push_str` takes about 10 µs per streamed word, parsing incrementally in the background. The text area submits on Enter and adds a line on Shift+Enter, with IME and selection handled. Of the 469 crates the app depends on, all are permissive except `option-ext` (MPL-2.0, unmodified).
+- Writing text input, markdown, lists and theming ourselves on `gpui` 0.2.2 would be months of work, on a GPUI that newer releases have left behind.
+- The manifest can't stay ours: on Windows `gpui-pre-platform` depends on `gpui-pre` with `windows-manifest`, and gpui-component, gpui-base and gpui-kit-assets turn on `gpui-pre`'s default features, which include it. Cargo can't turn off a feature a dependency turns on, and two manifests fail to link (`CVT1100: duplicate resource. type:MANIFEST, name:1`).
+- Losing the two settings costs little: the app calls only Unicode Windows APIs, Rust's standard library prefixes long paths itself, and paths and agents are `burrowd`'s business, which has never had a manifest.
+
+**Alternatives considered.** Staying on `gpui` 0.2.2 (see above). Vendoring and patching the four crates that turn the feature on: several megabytes to re-patch on every upgrade. Our manifest under another resource language: which one Windows loads is undefined.
+
+**Consequences.** D-010 is superseded and AGENTS.md updated. When upgrading GPUI, check its manifest. If the feature stops being forced, Burrow's manifest can come back from git history (`crates/burrow-app/resources/windows/burrow.manifest.xml`).
+
+## D-029 The app starts `burrowd` itself, detached, and every stream resumes after a reconnect
+
+**Decision.**
+- The app connects through `burrow-client` on `io_runtime()` (D-016); `--pipe` or `BURROW_PIPE` pick another pipe.
+- When nothing serves the pipe, it starts `burrowd.exe` from its own folder: no console (`DETACHED_PROCESS`), its own process group, no inherited handles, and outside the app's Job Object (`CREATE_BREAKAWAY_FROM_JOB`, falling back to inside it with a warning). Only on the default pipe; on another pipe only when given `--burrowd-args`/`BURROWD_ARGS`, and the app adds `--pipe`.
+- After starting it, the app retries every 50 ms for 10 s; otherwise it backs off from 250 ms to 5 s, and reconnects at once after a disconnect.
+- Every subscription goes through `backend::follow`, which subscribes again after the last seq its entity holds. The index is subscribed live first, then the lists are loaded with index events buffered meanwhile; a `reset` reloads them.
+
+**Why.** `burrowd` outlives the app (D-002), and terminals kill their Job Objects on close. `burrowd` has no lock on its data folder: a second one on the default data folder would mark the first one's sessions stopped. Index events set values, so replaying buffered ones on top of the lists converges.
+
+**Consequences.** No way to stop `burrowd` from the app yet. `entityCreated` doesn't carry a session's agent, nor `inboxItemAdded` an item's actions, so the app calls `session/get` or `inbox/get` for each new one.
+
+## D-030 The desktop app keeps plain models under GPUI entities, and splits the session view into header, transcript and prompt
+
+**Decision.**
+- `state::AppState` (connection status, `IndexModel`, agents; owns the connection loop and the index subscription) and `state::session::SessionStore` (one per open session: `SessionLog`, emitting `Appended`, `Reset`, `Loaded`) are GPUI entities views observe.
+- `IndexModel`, `SessionLog` and `TranscriptModel` hold the logic and have no GPUI in them; unit tests cover them. One GPUI test runs a real `burrowd` across a restart.
+- The session view composes three entities in their own files over one `SessionStore`: header, transcript and prompt box. `views/mod.rs` documents the layout and these boundaries.
+
+**Why.** The rest of M3 runs in parallel: one session rebuilds the transcript, another the session controls. Narrow interfaces over one store keep them out of each other's files.
+
+**Consequences.** New shared state goes into `state`, with its logic in a plain model.
 
 ## D-031 Muse's approval modes are its agent modes, and an agent can withdraw a permission request
 

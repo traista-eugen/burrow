@@ -44,6 +44,6 @@ When code and docs disagree, that's a bug. Fix whichever one is wrong, and say w
 - **Wire types live only in `burrow-protocol`.** Use serde with camelCase field names. Additive changes only within a protocol version (see [protocol.md](docs/protocol.md#handshake-and-versioning)).
 - **Every state change goes through the event store** (D-005). Never mutate state in a way clients can't follow.
 - **Agents and custom code run as separate processes inside Job Objects** (D-007). Nothing is loaded into `burrowd` as a plugin.
-- **Keep GPUI's `windows-manifest` feature off.** `burrow-app` embeds its own manifest (D-010).
+- **GPUI provides `burrow.exe`'s Windows manifest** (D-028). `burrow-app`'s resource script holds only the icon; don't add a manifest there, or linking fails.
 - **Workspace dependencies** are declared in the root `Cargo.toml` under `[workspace.dependencies]`. Crates use `dep.workspace = true`.
-- **Rust edition 2024.** `Cargo.lock` is committed, so dependency versions are pinned. Upgrade pre-1.0 dependencies such as `gpui` deliberately, one at a time (`cargo update -p gpui`), after reading their release notes.
+- **Rust edition 2024.** `Cargo.lock` is committed, so dependency versions are pinned. Upgrade pre-1.0 dependencies deliberately, after reading their release notes. `gpui` (the `gpui-pre` snapshot), `gpui_platform`, `gpui-component` and `gpui-kit-assets` are pinned with `=` and move together (D-028).
