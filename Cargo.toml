@@ -10,6 +10,7 @@ members = [
     "crates/burrowctl",
     "xtask",
     "crates/burrow-agents",
+    "crates/burrow-acp",
 ]
 
 [workspace.package]
@@ -52,6 +53,10 @@ windows-sys = "0.61.2"
 # `cargo xtask icons`: SVG to PNG. Same version GPUI already uses; no text or
 # embedded raster images in our icons, so their features stay off.
 resvg = { version = "0.45.1", default-features = false }
+# burrow-acp: the ACP client. `agent-client-protocol` pins its schema crate
+# exactly; use its types through `agent_client_protocol::v1::schema`.
+agent-client-protocol = "5.0.0"
+tokio-util = "0.7.20"
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.

@@ -26,6 +26,8 @@ Every decision that shapes the architecture gets an entry here.
 | [D-017](#d-017-current-state-lives-in-entity-rows-committed-with-its-events) | Current state lives in entity rows, committed with its events | 2026-11-09 | accepted |
 | [D-018](#d-018-one-adapter-interface-agent-processes-in-job-objects-and-a-fake-agent-that-is-a-real-process) | One adapter interface, agent processes in Job Objects, and a fake agent that is a real process | 2026-11-09 | accepted |
 | [D-019](#d-019-requests-run-concurrently-and-cancel-is-honoured) | Requests run concurrently, and `$/cancel` is honoured | 2026-11-09 | accepted |
+| [D-020](#d-020-acp-agents-are-launched-directly-npm-adapters-from-a-pinned-burrow-local-install) | ACP agents are launched directly; npm adapters from a pinned, Burrow-local install | 2026-11-09 | accepted |
+| [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
 
 ---
 
@@ -383,3 +385,53 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 **Consequences.**
 - Clients match answers by `id`, as the protocol always required. `burrow-client` gained `Client::start_call`, which returns a `PendingCall` that can send `$/cancel`.
 - A request cancelled after it finished, or one that doesn't support giving up, gets its normal answer.
+
+## D-020 ACP agents are launched directly; npm adapters from a pinned, Burrow-local install
+
+**Decision.**
+- **Cursor:** Burrow runs the CLI's own `node.exe` with its `index.js`, from the newest folder under `%LOCALAPPDATA%\cursor-agent\versions\`: `versions\<newest>\node.exe versions\<newest>\index.js acp`. It doesn't go through the `agent.cmd` shim.
+- **Claude Code and Codex:** Burrow installs each npm adapter once, at the version it was tested with, into `%LOCALAPPDATA%\Burrow\agents\<adapter>\<version>`. It runs the adapter as `node <that folder>\node_modules\@agentclientprotocol\<adapter>\dist\index.js`. The pinned versions are `claude-agent-acp` 0.101.0 and `codex-acp` 2.6.0.
+- `npx -y <package>@<version>` is a fallback only.
+- `burrow-acp::launch` builds these commands, and the install command too. Burrow's core spawns them inside Job Objects (D-007).
+
+**Why.**
+- **Cursor's shim costs time and processes.** `agent.cmd` starts PowerShell, which then starts `node.exe`. That is three processes instead of one. On the development machine `agent --version` took 680–870 ms through the shim and 510 ms directly.
+- **npx is slower and needs the network.** Measured from spawn to the `initialize` answer:
+
+  | | Local install | `npx -y`, cached | `npx -y`, first run |
+  |---|---|---|---|
+  | `claude-agent-acp` | 0.32–0.48 s | 1.2–1.3 s | 9.6 s |
+  | `codex-acp` | 0.21–0.80 s | 1.0–1.2 s | 4.6 s |
+  | Cursor (direct) | 0.49–0.87 s | | |
+
+  npx also asks the registry on every start, and runs `npm.cmd` and `cmd.exe` in front of the adapter.
+- **A pinned version is the version that was tested.** A global install (`npm i -g`) is shared with the user's other tools and drifts. A Burrow-owned folder per version makes upgrades deliberate and lets two versions sit side by side.
+- **The adapters bring their own agent.** `claude-agent-acp` bundles the Claude Agent SDK and its own Claude Code. `codex-acp` bundles its own Codex (0.166.0) and runs `codex app-server`. Both share the installed CLIs' logins (`~/.claude`, `~/.codex`). They can be pointed at the installed CLIs instead (`CLAUDE_CODE_EXECUTABLE`, `CODEX_PATH`). Burrow doesn't do that: the adapters are tested with their bundled versions, and a `CODEX_PATH` containing a space fails (codex-acp #602).
+
+**Alternatives considered.**
+- `agent.cmd acp`, `npx -y …` and global installs, for the reasons above.
+- Running a `.cmd` shim through `cmd.exe /c`: more processes, and command-line quoting problems.
+
+**Consequences.**
+- Burrow needs Node.js 22 or later on PATH for the two npm adapters. Cursor ships its own Node.
+- Installing an adapter takes a few seconds and 400–500 MB of disk, most of it the bundled agent binaries. Agent detection (`agent/list`) should offer to install a missing adapter. It should not install one silently.
+- A Cursor update that the shim hasn't promoted yet is picked up the next time the user runs `agent`. Burrow uses the newest promoted version.
+- Upgrading an adapter means changing the pinned version in `burrow-acp::launch` and running the live tests (`cargo test -p burrow-acp --test live -- --ignored`).
+
+## D-021 Burrow offers ACP agents no client capabilities in M2
+
+**Decision.**
+- In `initialize`, Burrow advertises no client capabilities: `fs.readTextFile`, `fs.writeTextFile` and `terminal` are all false.
+- Agents read and write files and run commands with their own tools.
+- The only agent-to-client request Burrow answers is `session/request_permission`. Any other request (`fs/*`, `terminal/*`) gets "method not found".
+
+**Why.**
+- All three agents work fully without them, as the live tests show: Claude Code, Codex and Cursor each created a file through their own tools after Burrow approved the request.
+- With `fs/*`, Burrow would have to serve file reads and writes, including unsaved editor buffers, which is what the capability is for. Burrow has no editor.
+- With `terminal`, Burrow would have to host the agents' shells. That belongs with M4's terminal work, if anywhere.
+- Fewer capabilities means less surface to keep correct across agent upgrades.
+
+**Consequences.**
+- Tool calls arrive as `toolCall` and `toolCallUpdate` events with text and diff content, never as Burrow terminals. `terminalOpened` stays unused by ACP sessions for now.
+- Each agent's own permission settings decide what it asks about, so the session mode matters. Claude Code asks before edits only in its `default` mode; the user's configured default here was `auto`. Codex asks in `read-only` mode. Cursor never asks before file edits, only before shell commands.
+- Revisit this if Burrow gets an editor view whose unsaved buffers agents should see, or if an agent needs client terminals.
