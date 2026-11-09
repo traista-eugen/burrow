@@ -350,3 +350,106 @@ async fn cancel_interrupts_the_turn_against_a_recorded_host() {
     );
     stop(started, host).await;
 }
+
+/// The approval recording, cut where Burrow would decide: Muse settles the approval by itself
+/// (a saved policy rule, standing in for a timeout or another client) and the turn ends.
+fn settled_by_muse() -> &'static str {
+    let entries: Vec<Value> = META_APPROVAL
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let method = |entry: &Value| entry["msg"]["method"].as_str().map(str::to_owned);
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| method(entry).as_deref() == Some(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("the recording has no {name}"))
+    };
+    // Everything up to Burrow's decision, which never comes.
+    let mut kept: Vec<Value> = entries
+        .iter()
+        .take_while(|entry| method(entry).as_deref() != Some("approval/decide"))
+        .cloned()
+        .collect();
+    let mut resolved = find("approval/resolved");
+    let params = &mut resolved["msg"]["params"];
+    params["resolvedBy"] = json!("policy");
+    params.as_object_mut().unwrap().remove("decidedByCommandId");
+    kept.push(resolved);
+    kept.push(find("turn/completed"));
+    let text: Vec<String> = kept.iter().map(Value::to_string).collect();
+    Box::leak(
+        text.join(
+            "
+",
+        )
+        .into_boxed_str(),
+    )
+}
+
+#[tokio::test]
+async fn an_approval_muse_settles_by_itself_is_withdrawn() {
+    let (mut started, host) = replayed(settled_by_muse()).await;
+    started
+        .session
+        .prompt(vec![ContentBlock::text(
+            "Run a command, then write a file.",
+        )])
+        .await
+        .unwrap();
+    let asked = until(&mut started.events, |event| {
+        matches!(event, AgentEvent::Permission(_))
+    })
+    .await;
+    let Some(AgentEvent::Permission(request)) = asked.into_iter().last() else {
+        unreachable!()
+    };
+    let asked_id = request.reply.id();
+    let rest = until(&mut started.events, |event| {
+        matches!(event, AgentEvent::TurnEnded { .. })
+    })
+    .await;
+    let withdrawn: Vec<_> = rest
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::PermissionWithdrawn(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(withdrawn, [asked_id], "{rest:#?}");
+    // The withdrawal comes before the turn's end, so the inbox item expires first.
+    assert!(matches!(rest.last(), Some(AgentEvent::TurnEnded { .. })));
+    drop(request);
+    stop(started, host).await;
+}
+
+#[tokio::test]
+async fn approval_modes_are_agent_modes() {
+    let (started, host) = replayed(ECHO_INTERRUPT).await;
+    let modes = started.session.agent_modes().expect("Muse has modes");
+    assert_eq!(modes.current, "promptUnmatched");
+    let ids: Vec<&str> = modes
+        .available
+        .iter()
+        .map(|mode| mode.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["promptUnmatched", "onRequest", "allowAll", "denyUnmatched"]
+    );
+    assert!(modes.available.iter().all(|mode| mode.name.is_some()));
+    let unknown = started
+        .session
+        .set_agent_mode("yolo".into())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(unknown, crate::adapter::AgentError::Invalid(_)),
+        "{unknown:?}"
+    );
+    // The recording goes on to a turn this test doesn't take: leave it there.
+    host.abort();
+    started.session.stop().await;
+}

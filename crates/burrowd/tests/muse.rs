@@ -23,7 +23,7 @@ use burrow_agents::msp::{NO_SANDBOX_ENV, PROVIDER_ENV, muse_binary};
 use burrow_client::{CallError, Client, ConnectError, Subscription};
 use burrow_protocol::methods::{
     AgentList, InboxList, InboxRespond, SessionCancel, SessionCreate, SessionPrompt,
-    SessionSetModel, SessionStop, UsageGet,
+    SessionSetAgentMode, SessionSetModel, SessionStop, UsageGet,
 };
 use burrow_protocol::*;
 use common::{WAIT, burrowd, connect, options, read_logs, unique_pipe};
@@ -418,6 +418,78 @@ async fn detection_runs_the_versioned_binary() {
         "not the versioned binary: {path}"
     );
     assert!(muse.available || muse.login.state == LoginState::LoggedOut);
+    assert_eq!(muse.default_agent_mode.as_deref(), Some("promptUnmatched"));
+}
+
+/// Muse's approval modes are the session's agent modes (D-031): it starts in the one that
+/// asks, `session/setAgentMode` switches through `session/setApprovalMode`, and
+/// `session/create` can start in another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn muse_approval_modes_are_agent_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let Some((_daemon, client)) = Daemon::start(dir.path(), "muse-modes", "echo", false).await
+    else {
+        return;
+    };
+    let session = create(&client, workspace.path()).await;
+    assert_eq!(session.agent_mode.as_deref(), Some("promptUnmatched"));
+    let modes: Vec<&str> = session
+        .agent_modes
+        .iter()
+        .map(|mode| mode.id.as_str())
+        .collect();
+    assert_eq!(
+        modes,
+        ["promptUnmatched", "onRequest", "allowAll", "denyUnmatched"]
+    );
+
+    let mut events = client
+        .subscribe(StreamName::session(&session.id), None)
+        .await
+        .unwrap();
+    let set = |mode: &str| SessionSetAgentModeParams {
+        session_id: session.id.clone(),
+        agent_mode: mode.into(),
+    };
+    client
+        .call::<SessionSetAgentMode>(&set("denyUnmatched"))
+        .await
+        .unwrap();
+    let changed = until(&mut events, |event| {
+        matches!(event, Event::AgentModeChanged(_))
+    })
+    .await;
+    assert!(matches!(&changed.last().unwrap().event,
+        Event::AgentModeChanged(c) if c.agent_mode == "denyUnmatched"));
+    let unknown = client.call::<SessionSetAgentMode>(&set("yolo")).await;
+    assert_eq!(
+        unknown.unwrap_err().rpc().map(|error| error.code),
+        Some(code::INVALID_PARAMS)
+    );
+    // The session still works, once, in its new mode.
+    prompt(&client, &session.id, "still there?").await;
+    let turn = until(&mut events, turn_ended).await;
+    assert_eq!(message_text(&turn), "echo: still there?");
+    assert!(
+        !types(&turn).contains(&"agentModeChanged"),
+        "the mode change was recorded twice: {:?}",
+        types(&turn)
+    );
+
+    let other = client
+        .call::<SessionCreate>(&SessionCreateParams {
+            project_id: None,
+            agent: AgentId::Muse,
+            model: None,
+            mode: SessionMode::Structured,
+            cwd: Some(workspace.path().display().to_string()),
+            title: None,
+            agent_mode: Some("allowAll".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(other.agent_mode.as_deref(), Some("allowAll"));
 }
 
 /// Live, against Muse's default `meta` provider: about 25k input tokens per model call, three

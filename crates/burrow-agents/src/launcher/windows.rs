@@ -6,7 +6,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use tokio::process::{Child, Command};
-use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
     TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -18,8 +18,8 @@ use windows_sys::Win32::System::JobObjects::{
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetExitCodeProcess, OpenProcess, OpenThread,
-    PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread, THREAD_SUSPEND_RESUME,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+    OpenThread, PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread, THREAD_SUSPEND_RESUME,
 };
 
 /// A Job Object whose processes all die when its last handle closes.
@@ -202,17 +202,49 @@ pub fn descendants(pid: u32) -> Vec<u32> {
     let mut found = Vec::new();
     let mut seen = HashSet::from([pid]);
     let mut queue = vec![pid];
+    let mut started: HashMap<u32, Option<u64>> = HashMap::new();
+    let mut start = |pid: u32| *started.entry(pid).or_insert_with(|| started_at(pid));
     while let Some(parent) = queue.pop() {
         for &child in children.get(&parent).into_iter().flatten() {
-            // Process ids are reused; a parent id can point at an unrelated newer process, and
-            // the System Idle Process is its own parent.
-            if seen.insert(child) {
+            // Process ids are reused: a parent id can name a newer, unrelated process that got
+            // the id of the child's real, dead parent. A real child started after its parent.
+            // And the System Idle Process is its own parent.
+            let stale = matches!((start(parent), start(child)), (Some(p), Some(c)) if c < p);
+            if !stale && seen.insert(child) {
                 found.push(child);
                 queue.push(child);
             }
         }
     }
     found
+}
+
+/// When process `pid` started, in 100 ns units since 1601, if it can be opened.
+fn started_at(pid: u32) -> Option<u64> {
+    // SAFETY: a plain open; the handle is owned and closed below.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: a fresh, valid handle owned from here on.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the handle has PROCESS_QUERY_LIMITED_INFORMATION access, and each pointer is to
+    // a FILETIME that outlives the call.
+    let ok = unsafe {
+        GetProcessTimes(
+            process.as_raw_handle(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } != 0;
+    ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 /// Whether a process with this id is running.

@@ -635,7 +635,7 @@
       "type": "object"
     },
     "EntityStateChanged": {
-      "description": "`entityStateChanged`: an entity moved to a new state.",
+      "description": "`entityStateChanged`: an entity moved to a new state, or, for a session, its last activity moved.",
       "properties": {
         "entity": {
           "$ref": "#/$defs/EntityKind",
@@ -645,8 +645,19 @@
           "description": "The entity's id.",
           "type": "string"
         },
+        "lastActivityAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A session's `lastActivityAt`, so a list sorted by activity can re-sort without `session/get`. Always present on session events from `burrowd`."
+        },
         "state": {
-          "description": "The new state: one of the session states or run states in protocol.md. Kept as a string so new states don't break older clients.",
+          "description": "The state: one of the session states or run states in protocol.md. Kept as a string so new states don't break older clients. Usually a new state; the same state when only `lastActivityAt` moved.",
           "type": "string"
         },
         "type": {
@@ -2120,6 +2131,17 @@
           "description": "The session's id (`ses_…`).",
           "type": "string"
         },
+        "lastActivityAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When a turn last started or ended; `createdAt` until the first prompt. `session/list` sorts by it, most recent first. `burrowd` always sets it; it is optional only so that sessions stored before it existed still decode."
+        },
         "limit": {
           "anyOf": [
             {
@@ -2168,7 +2190,7 @@
           "description": "The current state."
         },
         "title": {
-          "description": "The display name. Set from the first prompt when `session/create` didn't give one.",
+          "description": "The display name. Set from the first prompt when `session/create` didn't give one; `session/rename` changes it.",
           "type": [
             "string",
             "null"
@@ -2278,7 +2300,7 @@
       "description": "`session/list` params. Every filter is optional.",
       "properties": {
         "before": {
-          "description": "Only sessions created before this one: pass the last id of the previous page.",
+          "description": "Only sessions that come after this one in the list's order (most recent activity first): pass the last id of the previous page.",
           "type": [
             "string",
             "null"
@@ -2364,6 +2386,24 @@
       },
       "required": [
         "turnId"
+      ],
+      "type": "object"
+    },
+    "SessionRenameParams": {
+      "description": "`session/rename` params.",
+      "properties": {
+        "sessionId": {
+          "description": "The session.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The new display name: not empty, at most 200 characters. Surrounding whitespace is trimmed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "title"
       ],
       "type": "object"
     },
@@ -2470,6 +2510,17 @@
         "id": {
           "description": "The session's id.",
           "type": "string"
+        },
+        "lastActivityAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When a turn last started or ended; `createdAt` until the first prompt. Lists are sorted by it, most recent first."
         },
         "model": {
           "description": "The model, if known.",
@@ -3361,6 +3412,14 @@
       },
       "result": {
         "$ref": "#/$defs/SessionPromptResult"
+      }
+    },
+    "session/rename": {
+      "params": {
+        "$ref": "#/$defs/SessionRenameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
       }
     },
     "session/setAgentMode": {

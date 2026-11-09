@@ -8,26 +8,70 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use burrow_msp::{
-    ApprovalRequestParams, ErrorKind, Event, Events, ModelListResult, MspClient, MspError,
-    SessionStartParams, TurnStartParams,
+    ApprovalMode, ApprovalRequestParams, ErrorKind, Event, Events, ModelListResult, MspClient,
+    MspError, SessionStartParams, TurnStartParams,
 };
-use burrow_protocol::{ContentBlock, ModelInfo};
+use burrow_protocol::{AgentMode, ContentBlock, ModelInfo};
 use futures::future::BoxFuture;
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use super::translate::{self, Output, Translator, display_path};
 use crate::adapter::{
-    AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply, PermissionRequest,
-    SessionConfig, StartedSession,
+    AgentError, AgentEvent, AgentModes, AgentSession, PermissionId, PermissionOutcome,
+    PermissionReply, PermissionRequest, SessionConfig, StartedSession,
 };
 use crate::launcher::ProcessHandle;
 
 /// How long a stopping Muse gets to unload its session and exit after its stdin closes.
 pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// The approval mode sessions start in: Muse's own default, the one that asks before anything
+/// its policy doesn't already allow (D-031).
+pub const DEFAULT_MODE: ApprovalMode = ApprovalMode::PromptUnmatched;
+
+/// Muse's approval modes, as agent modes: id, name, description.
+const MODES: &[(ApprovalMode, &str, &str)] = &[
+    (
+        ApprovalMode::PromptUnmatched,
+        "Ask",
+        "Asks before anything its policy doesn't already allow, such as a shell command it can't sandbox. Muse's default.",
+    ),
+    (
+        ApprovalMode::OnRequest,
+        "On request",
+        "Asks only when the model asks for approval.",
+    ),
+    (
+        ApprovalMode::AllowAll,
+        "Allow all",
+        "Runs every tool without asking.",
+    ),
+    (
+        ApprovalMode::DenyUnmatched,
+        "Deny unmatched",
+        "Refuses anything its policy doesn't already allow, without asking.",
+    ),
+];
+
 /// Approvals waiting for a decision, by approval id, as Muse last described them.
 type Approvals = Arc<Mutex<HashMap<String, ApprovalRequestParams>>>;
+
+/// The approval mode in force, shared by the handle and the event loop.
+type CurrentMode = Arc<Mutex<ApprovalMode>>;
+
+/// Muse's approval modes as agent modes.
+pub(super) fn agent_modes() -> Vec<AgentMode> {
+    MODES
+        .iter()
+        .map(|(mode, name, description)| AgentMode {
+            id: mode.as_str().to_owned(),
+            name: Some((*name).to_owned()),
+            description: Some((*description).to_owned()),
+        })
+        .collect()
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -44,17 +88,26 @@ pub(super) async fn open(
     let workspace = display_path(&config.cwd.display().to_string());
     let mut params = SessionStartParams::new(workspace.clone());
     params.model_id.clone_from(&config.model);
+    // Start in the mode that asks, whatever Muse would otherwise start in (D-031).
+    params.approval_mode = Some(DEFAULT_MODE);
     let session = client
         .start_session(&params)
         .await
         .map_err(|error| start_error(&error))?
         .session;
     let session_id = session.session_id.clone();
+    let mode: CurrentMode = Arc::new(Mutex::new(
+        session
+            .approval_mode
+            .as_ref()
+            .map_or(DEFAULT_MODE, |effective| effective.mode.clone()),
+    ));
     info!(
         session = config.session_id,
         muse_session = session_id,
         provider = session.provider_id.as_deref().unwrap_or("-"),
         model = session.model_id.as_deref().unwrap_or("-"),
+        approval_mode = lock(&mode).as_str(),
         "muse session started"
     );
 
@@ -83,8 +136,11 @@ pub(super) async fn open(
     tokio::spawn(
         Loop {
             client: client.clone(),
+            session_id: session_id.clone(),
             translator: translator.clone(),
             approvals: Approvals::default(),
+            asked: HashMap::new(),
+            mode: mode.clone(),
             process: process.clone(),
             stopping: stopping.clone(),
             events: sender,
@@ -97,6 +153,7 @@ pub(super) async fn open(
             client,
             session_id: session_id.clone(),
             translator,
+            mode,
             process,
             stopping,
         }),
@@ -156,6 +213,7 @@ struct MspSession {
     client: MspClient,
     session_id: String,
     translator: Arc<Mutex<Translator>>,
+    mode: CurrentMode,
     process: Option<ProcessHandle>,
     stopping: Arc<AtomicBool>,
 }
@@ -223,6 +281,40 @@ impl AgentSession for MspSession {
         })
     }
 
+    fn agent_modes(&self) -> Option<AgentModes> {
+        Some(AgentModes {
+            current: lock(&self.mode).as_str().to_owned(),
+            available: agent_modes(),
+        })
+    }
+
+    fn set_agent_mode(&self, mode: String) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async move {
+            let Some((wanted, _, _)) = MODES.iter().find(|(known, _, _)| known.as_str() == mode)
+            else {
+                let ids: Vec<&str> = MODES.iter().map(|(known, _, _)| known.as_str()).collect();
+                return Err(AgentError::Invalid(format!(
+                    "Muse Code has no mode {mode:?}; it offers {}",
+                    ids.join(", ")
+                )));
+            };
+            let result = self
+                .client
+                .set_approval_mode(&self.session_id, wanted.clone())
+                .await
+                .map_err(|error| call_error("the approval mode", error))?;
+            let effective = result.effective_mode.mode;
+            if effective != *wanted {
+                return Err(AgentError::Failed(format!(
+                    "Muse kept approval mode {} instead of switching to {mode}",
+                    effective.as_str()
+                )));
+            }
+            *lock(&self.mode) = effective;
+            Ok(())
+        })
+    }
+
     fn stop(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.stopping.store(true, Ordering::SeqCst);
@@ -238,8 +330,14 @@ impl AgentSession for MspSession {
 /// Reads one session's MSP events until the connection closes.
 struct Loop {
     client: MspClient,
+    /// Muse's id for the session.
+    session_id: String,
     translator: Arc<Mutex<Translator>>,
     approvals: Approvals,
+    /// The approvals Burrow asked about and hasn't seen settled, by approval id: the request
+    /// each became, so it can be withdrawn when Muse settles the approval by itself.
+    asked: HashMap<String, PermissionId>,
+    mode: CurrentMode,
     process: Option<ProcessHandle>,
     stopping: Arc<AtomicBool>,
     events: mpsc::UnboundedSender<AgentEvent>,
@@ -251,6 +349,26 @@ impl Loop {
     async fn run(mut self, mut events: Events) {
         while let Some(event) = events.recv().await {
             self.track_approvals(&event);
+            match &event {
+                Event::ApprovalResolved(resolved) => {
+                    // Settled: by Burrow's own answer (then the manager ignores this), or by Muse
+                    // itself, a timeout or another client (then the inbox item expires).
+                    if let Some(permission) = self.asked.remove(&resolved.approval_id) {
+                        debug!(
+                            approval = resolved.approval_id,
+                            decision = resolved.decision.as_str(),
+                            "an approval was settled"
+                        );
+                        let _ = self
+                            .events
+                            .send(AgentEvent::PermissionWithdrawn(permission));
+                    }
+                }
+                Event::Other { method, params } if method == "session/approvalModeChanged" => {
+                    self.approval_mode_changed(params.as_ref());
+                }
+                _ => {}
+            }
             let outputs = lock(&self.translator).on_event(event);
             for output in outputs {
                 self.perform(output).await;
@@ -276,6 +394,29 @@ impl Loop {
             })
         };
         let _ = self.events.send(AgentEvent::Exited { error });
+    }
+
+    /// `session/approvalModeChanged`: another client, or Burrow itself, switched the mode.
+    /// burrow-msp doesn't model the notification, so its params are read here.
+    fn approval_mode_changed(&self, params: Option<&Value>) {
+        let Some(params) = params else { return };
+        if params["sessionId"].as_str() != Some(self.session_id.as_str()) {
+            return;
+        }
+        let Some(mode) = params["mode"].as_str().map(ApprovalMode::from) else {
+            return;
+        };
+        let changed = {
+            let mut current = lock(&self.mode);
+            let changed = *current != mode;
+            *current = mode.clone();
+            changed
+        };
+        if changed {
+            let _ = self
+                .events
+                .send(AgentEvent::AgentModeChanged(mode.as_str().to_owned()));
+        }
     }
 
     /// Keeps the approvals waiting for an answer as Muse last described them, so an answer
@@ -333,6 +474,11 @@ impl Loop {
                 approval,
             } => {
                 let (reply, answer) = PermissionReply::channel();
+                // A new requirement of an approval Burrow asked about before (a multi-stage
+                // command): the earlier question, if still open, is moot.
+                if let Some(earlier) = self.asked.insert(approval.approval_id.clone(), reply.id()) {
+                    let _ = self.events.send(AgentEvent::PermissionWithdrawn(earlier));
+                }
                 tokio::spawn(decide(
                     self.client.clone(),
                     self.approvals.clone(),

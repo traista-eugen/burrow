@@ -5,14 +5,16 @@
 //!
 //! On start it launches a child of its own (itself with `--sleeper`), so every session has a
 //! real process tree. It offers three modes, `auto` (its default, which never asks), `ask` and
-//! `plan`; two models, `fake-fast` and `fake-smart`, as a `model` config option; and
-//! `session/resume` for any session id. Prompts are scripted:
+//! `plan`; three models as a `model` config option: `fake-fast`, `fake-smart`, and
+//! `fake-param[context=1k,effort=high]`, named `fake-param` the way Cursor names its
+//! parameterized models; and `session/resume` for any session id. Prompts are scripted:
 //!
 //! | Prompt | What happens |
 //! |---|---|
 //! | anything else | A thought, `Echo: <prompt>` word by word, the session's cost, usage |
 //! | `/permission` | A tool call, then, unless the mode is `auto`, a permission request; the turn waits for the answer |
 //! | `/sudden-permission` | A permission request about a tool call it never announced |
+//! | `/withdraw` | A permission request it withdraws with `$/cancel_request` after 200 ms, as if it timed out; the turn then carries on |
 //! | `/limit` | Claude Code's 5-hour limit notice, then the error it sends |
 //! | `/slow` | 50 chunks, 100 ms apart; a cancel ends the turn `cancelled` |
 //! | `/hang` | Never ends the turn, and ignores `session/cancel` (like codex-acp#641) |
@@ -37,8 +39,13 @@ use serde_json::{Value, json};
 pub const ASK_MODE: &str = "ask";
 /// The modes, the first being the fake's own default.
 pub const MODES: &[&str] = &["auto", ASK_MODE, "plan"];
-/// The models, the first being the default.
-pub const MODELS: &[&str] = &["fake-fast", "fake-smart"];
+/// The models, the first being the default. The last has parameters, like Cursor's, and is
+/// named after its base: `fake-param`.
+pub const MODELS: &[&str] = &[
+    "fake-fast",
+    "fake-smart",
+    "fake-param[context=1k,effort=high]",
+];
 /// The limit notice `/limit` sends, as Claude Code words it.
 pub const LIMIT_NOTICE: &str = "You've hit your 5-hour limit · resets 3pm (Europe/Bucharest)";
 
@@ -47,6 +54,8 @@ pub const LIMIT_NOTICE: &str = "You've hit your 5-hour limit · resets 3pm (Euro
 const SLEEPER_LIFETIME: Duration = Duration::from_secs(600);
 /// The pause between streamed words.
 const WORD_DELAY: Duration = Duration::from_millis(5);
+/// How long `/withdraw` waits for an answer before it withdraws its request.
+const WITHDRAW_AFTER: Duration = Duration::from_millis(200);
 
 /// A message from the client.
 enum Incoming {
@@ -223,7 +232,7 @@ impl Agent {
             "category": "model",
             "type": "select",
             "currentValue": self.model,
-            "options": MODELS.iter().map(|model| json!({"value": model, "name": capitalize(model)})).collect::<Vec<_>>(),
+            "options": MODELS.iter().map(|model| json!({"value": model, "name": model_name(model)})).collect::<Vec<_>>(),
         }])
     }
 
@@ -328,6 +337,7 @@ impl Agent {
         let result = match text.trim() {
             "/permission" => self.permission(true),
             "/sudden-permission" => self.permission(false),
+            "/withdraw" => self.withdraw(),
             "/limit" => {
                 self.chunk("agent_message_chunk", LIMIT_NOTICE);
                 self.fail(
@@ -488,6 +498,77 @@ impl Agent {
             "content": [{"type": "content", "content": {"type": "text", "text": reply}}],
         }));
         self.stream(reply)
+    }
+}
+
+impl Agent {
+    /// Asks permission, waits [`WITHDRAW_AFTER`] for an answer, then withdraws the request with
+    /// `$/cancel_request` and carries on, as an agent whose question timed out does. ACP still
+    /// expects the client to answer the withdrawn request (as cancelled); the fake waits for
+    /// that answer.
+    fn withdraw(&mut self) -> Result<(), Interrupt> {
+        let call = format!("call_{}", self.next_id);
+        let request_id = format!("perm-{}", self.next_id + 1);
+        self.next_id += 2;
+        self.update(json!({
+            "sessionUpdate": "tool_call", "toolCallId": call, "title": "Run cleanup.ps1",
+            "kind": "execute", "status": "pending",
+        }));
+        self.write(&json!({
+            "jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
+            "params": {
+                "sessionId": self.session.clone().unwrap_or_default(),
+                "toolCall": {"toolCallId": call},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }));
+        let mut cancelled = false;
+        let mut withdrawn = false;
+        let deadline = Instant::now() + WITHDRAW_AFTER;
+        loop {
+            let wait = match deadline.checked_duration_since(Instant::now()) {
+                Some(left) if !withdrawn => left,
+                _ => {
+                    if !withdrawn {
+                        withdrawn = true;
+                        self.write(&json!({
+                            "jsonrpc": "2.0", "method": "$/cancel_request",
+                            "params": {"requestId": request_id},
+                        }));
+                    }
+                    Duration::from_secs(3600)
+                }
+            };
+            match self.poll(wait) {
+                Ok(Some(Incoming::Response { id, .. })) if id == json!(request_id) => break,
+                Ok(_) => {}
+                Err(Interrupt::Cancelled) => cancelled = true,
+                Err(Interrupt::Gone) => return Err(Interrupt::Gone),
+            }
+        }
+        if cancelled {
+            return Err(Interrupt::Cancelled);
+        }
+        if !withdrawn {
+            return self.stream("You answered before the timeout.");
+        }
+        self.update(json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": call, "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "Nobody answered in time"}}],
+        }));
+        self.stream("Nobody answered, so I skipped the cleanup.")
+    }
+}
+
+/// A model's display name: the base of a parameterized id, as Cursor names them, or else the
+/// id capitalized.
+fn model_name(model: &str) -> String {
+    match model.split_once('[') {
+        Some((base, _)) => base.to_owned(),
+        None => capitalize(model),
     }
 }
 

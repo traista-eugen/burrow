@@ -193,7 +193,14 @@ async fn an_acp_session_streams_and_starts_in_the_mode_that_asks() {
     assert_eq!(session.agent_modes[1].name.as_deref(), Some("Ask"));
     assert_eq!(session.model.as_deref(), Some("fake-fast"));
     let models: Vec<&str> = session.models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(models, ["fake-fast", "fake-smart"]);
+    assert_eq!(
+        models,
+        [
+            "fake-fast",
+            "fake-smart",
+            "fake-param[context=1k,effort=high]"
+        ]
+    );
 
     let mut events = client
         .subscribe(StreamName::session(&session.id), None)
@@ -618,6 +625,137 @@ async fn stopping_an_acp_session_leaves_no_stray_processes() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_the_acp_agent_withdraws_expires_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_daemon, client) = start(dir.path(), "acp-withdraw").await;
+    let session = create(&client, dir.path()).await;
+    let mut events = client
+        .subscribe(StreamName::session(&session.id), None)
+        .await
+        .unwrap();
+
+    // The agent asks, then sends `$/cancel_request` instead of waiting for an answer.
+    prompt(&client, &session.id, "/withdraw").await;
+    let turn = until(&mut events, turn_ended).await;
+    let kinds = types(&turn);
+    let asked = kinds
+        .iter()
+        .position(|kind| *kind == "permissionRequested")
+        .expect("asked");
+    assert_eq!(
+        kinds[asked..asked + 4],
+        [
+            "permissionRequested",
+            "stateChanged",
+            "permissionResolved",
+            "stateChanged"
+        ],
+        "{kinds:?}"
+    );
+    let Event::PermissionRequested(request) = &turn[asked].event else {
+        unreachable!()
+    };
+    assert!(matches!(&turn[asked + 2].event,
+        Event::PermissionResolved(r) if r.inbox_item_id == request.inbox_item_id
+            && r.status == InboxItemStatus::Expired && r.option_id.is_none()));
+    assert!(matches!(&turn[asked + 3].event,
+        Event::StateChanged(c) if c.state == SessionState::Working));
+    // ACP still wanted an answer to the withdrawn request; the turn went on and ended normally.
+    let text: String = turn
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::AgentMessageChunk(chunk) => Some(chunk.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Nobody answered, so I skipped the cleanup.");
+    assert_eq!(last_turn_end(&turn).reason, TurnEndReason::Completed);
+
+    let answer = client
+        .call::<InboxRespond>(&InboxRespondParams {
+            item_id: request.inbox_item_id.clone(),
+            action: "allow-once".into(),
+            payload: None,
+        })
+        .await;
+    assert_eq!(error_kind(answer), ErrorKind::Conflict);
+    let open = client
+        .call::<InboxList>(&InboxListParams {
+            status: Some(InboxItemStatus::Open),
+            ..InboxListParams::default()
+        })
+        .await
+        .unwrap();
+    assert!(open.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn models_are_named_by_id_or_name_and_listed_from_the_latest_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_daemon, client) = start(dir.path(), "acp-models").await;
+    const PARAM: &str = "fake-param[context=1k,effort=high]";
+
+    // Detection can't tell an ACP agent's models; no session has run yet.
+    let agents = client.call::<AgentList>(&Empty {}).await.unwrap();
+    assert!(agents[0].models.is_empty(), "{:?}", agents[0].models);
+
+    // A parameterized model, named by its base name, as Cursor's `gpt-5.5` is.
+    let mut params = create_params(dir.path());
+    params.model = Some("fake-param".into());
+    let session = client.call::<SessionCreate>(&params).await.unwrap();
+    assert_eq!(session.model.as_deref(), Some(PARAM));
+    let param = session
+        .models
+        .iter()
+        .find(|model| model.id == PARAM)
+        .expect("listed");
+    assert_eq!(param.name.as_deref(), Some("fake-param"));
+
+    // agent/list now offers the session's own ids, which session/create accepts as they are.
+    let agents = client.call::<AgentList>(&Empty {}).await.unwrap();
+    let ids: Vec<&str> = agents[0]
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["fake-fast", "fake-smart", PARAM]);
+    params.model = Some(PARAM.into());
+    let exact = client.call::<SessionCreate>(&params).await.unwrap();
+    assert_eq!(exact.model.as_deref(), Some(PARAM));
+
+    // setModel by name, ignoring case; the session records the id.
+    let mut events = client
+        .subscribe(StreamName::session(&exact.id), None)
+        .await
+        .unwrap();
+    client
+        .call::<SessionSetModel>(&SessionSetModelParams {
+            session_id: exact.id.clone(),
+            model: "Fake-Smart".into(),
+        })
+        .await
+        .unwrap();
+    until(
+        &mut events,
+        |event| matches!(event, Event::ModelChanged(c) if c.model == "fake-smart"),
+    )
+    .await;
+    client
+        .call::<SessionSetModel>(&SessionSetModelParams {
+            session_id: exact.id.clone(),
+            model: "fake-param".into(),
+        })
+        .await
+        .unwrap();
+    until(
+        &mut events,
+        |event| matches!(event, Event::ModelChanged(c) if c.model == PARAM),
+    )
+    .await;
+    assert_eq!(get(&client, &exact.id).await.model.as_deref(), Some(PARAM));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

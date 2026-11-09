@@ -303,6 +303,7 @@ fn typed_methods_share_one_table() {
             "session/cancel",
             "session/setModel",
             "session/setAgentMode",
+            "session/rename",
             "session/stop",
             "session/archive",
             "inbox/list",

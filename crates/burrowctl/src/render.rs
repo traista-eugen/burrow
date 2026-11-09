@@ -222,6 +222,15 @@ pub fn agent(agent: &AgentInfo) -> String {
         agent.name,
         version
     );
+    // An available agent can still have a problem, such as Muse's sandbox not being set up.
+    if agent.available
+        && let Some(problem) = &agent.problem
+    {
+        line.push_str(&format!(
+            "
+        problem: {problem}"
+        ));
+    }
     if let Some(adapter) = &agent.adapter {
         let state = if adapter.installed {
             "installed"
@@ -341,4 +350,50 @@ pub fn usage(usage: &ProviderUsage) -> String {
         line.push_str(&format!("  ({message})"));
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use burrow_protocol::{AgentId, AgentLogin, Integration, Timestamp};
+
+    use super::*;
+
+    fn muse(available: bool, problem: Option<&str>) -> AgentInfo {
+        AgentInfo {
+            id: AgentId::Muse,
+            name: "Muse Code".into(),
+            integration: Integration::Msp,
+            installed: true,
+            version: Some("1.4.14".into()),
+            path: None,
+            login: AgentLogin {
+                state: LoginState::LoggedIn,
+                account: None,
+                detail: None,
+            },
+            models: Vec::new(),
+            available,
+            problem: problem.map(Into::into),
+            adapter: None,
+            default_agent_mode: Some("promptUnmatched".into()),
+            detected_at: Timestamp::now(),
+        }
+    }
+
+    #[test]
+    fn an_available_agent_shows_its_problem_too() {
+        let text = agent(&muse(true, Some("Set up the sandbox.")));
+        assert!(text.contains("available"), "{text}");
+        assert!(text.contains("problem: Set up the sandbox."), "{text}");
+        assert!(
+            text.contains("sessions start in mode: promptUnmatched"),
+            "{text}"
+        );
+
+        let text = agent(&muse(false, Some("Not logged in.")));
+        assert!(text.contains("unavailable: Not logged in."), "{text}");
+        assert!(!text.contains("problem:"), "said twice: {text}");
+
+        assert!(!agent(&muse(true, None)).contains("problem:"));
+    }
 }

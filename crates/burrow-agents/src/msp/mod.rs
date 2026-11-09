@@ -11,6 +11,10 @@
 //! - **User input.** Muse starts with `--disable-request-user-input`: its model can't ask the
 //!   user questions, which Burrow can't show yet (D-027). A question that arrives anyway is
 //!   declined at once.
+//! - **Modes.** Muse's approval modes (`promptUnmatched`, `onRequest`, `allowAll`,
+//!   `denyUnmatched`) are the session's agent modes, switched with `session/setApprovalMode`.
+//!   Sessions start in `promptUnmatched`, which asks before anything Muse's policy doesn't
+//!   already allow (D-031).
 //! - **The sandbox.** Muse's shell tool fails on Windows until `muse sandbox windows setup` has
 //!   run in an elevated terminal. Burrow doesn't pass `--disable-sandbox`; [`MspAdapter::detect`]
 //!   reports the missing setup as the agent's `problem` instead (D-027).
@@ -23,7 +27,8 @@
 //!
 //! [`session`] holds the command handle and the loop that reads MSP's events; [`translate`]
 //! maps them to [`AgentEvent`](crate::AgentEvent)s: text, reasoning, tool calls with diffs,
-//! approvals as permission requests, token usage, limits and the turn's end.
+//! approvals as permission requests, token usage, limits and the turn's end. An approval Muse
+//! settles by itself (a timeout, another client) withdraws its permission request (D-031).
 
 mod session;
 mod translate;
@@ -224,9 +229,9 @@ async fn detect_muse() -> AgentInfo {
         models: Vec::new(),
         available: false,
         problem: None,
-        // Muse has no adapter to install, and no agent mode of its own yet.
+        // Muse has no adapter to install. Its agent modes are its approval modes (D-031).
         adapter: None,
-        default_agent_mode: None,
+        default_agent_mode: Some(session::DEFAULT_MODE.as_str().to_owned()),
         detected_at: Timestamp::now(),
     };
     let Some(program) = muse_binary() else {

@@ -1,16 +1,19 @@
-//! Detecting the agent CLIs: where they are, their version, whether they are logged in, and
-//! their models where that's cheap.
+//! Detecting the agent CLIs: where they are, their version, and whether they are logged in.
 //!
 //! Every command here is read-only and spends no quota:
 //!
-//! | Agent | Version | Login | Models |
-//! |---|---|---|---|
-//! | Claude Code | `claude --version` | `claude auth status` (JSON with `loggedIn`) | — |
-//! | Codex | `codex --version` | `codex login status` ("Logged in using ChatGPT") | — |
-//! | Cursor | `agent --version` | `agent status` ("✓ Logged in as …") | `agent models` |
-//! | Muse | `muse --version` | `muse usage` ("not logged in", or the allowance) | — |
+//! | Agent | Version | Login |
+//! |---|---|---|
+//! | Claude Code | `claude --version` | `claude auth status` (JSON with `loggedIn`) |
+//! | Codex | `codex --version` | `codex login status` ("Logged in using ChatGPT") |
+//! | Cursor | `agent --version` | `agent status` ("✓ Logged in as …") |
+//! | Muse | `muse --version` | `muse usage` ("not logged in", or the allowance) |
 //!
 //! Commands run through the launcher, in their own Job Objects, with a timeout.
+//!
+//! No models come from here. Cursor's `agent models` lists ids its ACP sessions don't accept
+//! (`gpt-5.3-codex-high` where a session offers `gpt-5.3-codex[reasoning=medium,fast=false]`),
+//! so `burrowd` reports the models of an agent's latest session instead (D-032).
 //!
 //! Muse is detected by [`crate::msp::MspAdapter`], which runs the same commands on Muse's
 //! versioned binary, not its `muse.cmd` launcher (D-023), and asks a throwaway
@@ -20,9 +23,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use burrow_protocol::{
-    AgentId, AgentInfo, AgentLogin, Integration, LoginState, ModelInfo, Timestamp,
-};
+use burrow_protocol::{AgentId, AgentInfo, AgentLogin, Integration, LoginState, Timestamp};
 use serde_json::Value;
 use tracing::debug;
 
@@ -137,13 +138,7 @@ pub async fn detect(agent: &CliAgent) -> AgentInfo {
         );
         async move { launcher::run_capture(&spec, COMMAND_TIMEOUT).await }
     };
-    let (version, login, models) =
-        tokio::join!(run(&["--version"]), run(login_args(agent.id)), async {
-            match agent.id {
-                "cursor" => Some(run(&["models"]).await),
-                _ => None,
-            }
-        });
+    let (version, login) = tokio::join!(run(&["--version"]), run(login_args(agent.id)));
 
     match version {
         Ok(output) => info.version = parse_version(&output.text()),
@@ -157,10 +152,6 @@ pub async fn detect(agent: &CliAgent) -> AgentInfo {
             detail: Some(format!("checking the login failed: {error}")),
         },
     };
-    if let Some(Ok(output)) = models {
-        info.models = parse_cursor_models(&output.stdout);
-    }
-
     match info.login.state {
         LoginState::LoggedOut => {
             info.problem = Some(format!("not logged in: run `{}` and log in", agent.program));
@@ -307,25 +298,6 @@ pub fn parse_muse_usage(output: &str) -> AgentLogin {
     }
 }
 
-/// `agent models`: a heading, then `id - Name` lines.
-pub fn parse_cursor_models(output: &str) -> Vec<ModelInfo> {
-    clean(output)
-        .lines()
-        .filter_map(|line| {
-            let (id, name) = line.split_once(" - ")?;
-            let id = id.trim();
-            if id.is_empty() || id.contains(char::is_whitespace) {
-                return None;
-            }
-            let name = name.trim();
-            Some(ModelInfo {
-                id: id.to_owned(),
-                name: (!name.is_empty()).then(|| name.to_owned()),
-            })
-        })
-        .collect()
-}
-
 /// The first non-empty line, trimmed.
 fn first_line(text: &str) -> Option<String> {
     text.lines()
@@ -429,15 +401,5 @@ mod tests {
             LoginState::LoggedOut
         );
         assert_eq!(parse_muse_usage("").state, LoginState::Unknown);
-    }
-
-    #[test]
-    fn cursor_models_list() {
-        let output = "Available models\n\nauto - Auto (default)\ngpt-5.2 - GPT-5.2\ngrok-4.7-low-fast - Grok 4.7  Low Fast\u{200b}\u{200b}\n\nTip: use --model\n";
-        let models = parse_cursor_models(output);
-        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["auto", "gpt-5.2", "grok-4.7-low-fast"]);
-        assert_eq!(models[0].name.as_deref(), Some("Auto (default)"));
-        assert_eq!(models[2].name.as_deref(), Some("Grok 4.7  Low Fast"));
     }
 }
