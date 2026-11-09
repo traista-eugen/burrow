@@ -295,10 +295,10 @@ type RoleConfig = { role: string; candidates: Candidate[]; waitIfResetWithinMinu
 
 How detection works (M2):
 - **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota.
-- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout.
+- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout. For Muse they run its versioned binary, and a throwaway `muse serve --provider echo` gives its models and whether its shell sandbox is set up.
 - **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
-- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. Until M2's ACP and MSP adapters land, that includes all four real agents.
-- **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. It is kept in memory only, and is empty again after a restart.
+- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. Until M2's ACP adapter lands, that includes Claude Code, Codex and Cursor. An available agent can have a `problem` too, for something that looks wrong, such as Muse's shell sandbox not being set up.
+- **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. Muse also reports its subscription usage (provider `muse`) when a session starts and when it changes; an empty reading means none was observed, not a limit. Usage is kept in memory only, and is empty again after a restart.
 
 ### Sessions
 

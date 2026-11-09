@@ -104,7 +104,7 @@ Each adapter does two jobs:
 | Claude Code | ACP through `@agentclientprotocol/claude-agent-acp` 0.101.0 (npm) | Wraps the Claude Agent SDK. Before distributing Burrow, check Anthropic's terms: third-party products are expected to use API keys rather than claude.ai login unless approved. |
 | Codex | ACP through `@agentclientprotocol/codex-acp` 2.6.0 (npm) | The adapter runs `codex app-server` itself. A direct app-server adapter is the fallback if Burrow needs Codex's structured rate limits. |
 | Cursor | ACP, built in: `agent acp` | Log in with `agent login` or set `CURSOR_API_KEY`. |
-| Muse Code | MSP, Meta's own protocol, through `muse serve`. Client: `burrow-msp` | Verified with Muse 1.4.14; see [Muse over MSP](#muse-over-msp). `--provider echo` is free and suits tests, but can't call tools. |
+| Muse Code | MSP, Meta's own protocol, through `muse serve`. Client: `burrow-msp`; adapter: `burrow_agents::msp` | Works end to end with Muse 1.4.14; see [Muse over MSP](#muse-over-msp). `--provider echo` is free and suits tests, but can't call tools. The shell tool needs `muse sandbox windows setup`, run elevated. |
 | Any other CLI | Terminal (ConPTY) | The universal fallback. Burrow sees only the screen, not structure. |
 
 The ACP side is the `burrow-acp` crate, built on the `agent-client-protocol` SDK (5.0.0). The two npm adapters need Node.js 22 or later.
@@ -160,12 +160,13 @@ None of them needs `authenticate` when its CLI is logged in. Burrow offers them 
 
 **Status:**
 - **Detection** of all four agents works (see [protocol.md](protocol.md#agents-roles-and-usage)).
-- **ACP and MSP adapters** are M2's phase 2. Their modules, `burrow_agents::acp` and `burrow_agents::msp`, detect the agents and refuse to start until then; their docs say how they will wrap `burrow-acp` and `burrow-msp`.
+- **The MSP adapter** (`burrow_agents::msp`) runs Muse Code sessions; see [Muse over MSP](#muse-over-msp).
+- **The ACP adapter** is M2's phase 2. Its module, `burrow_agents::acp`, detects the agents and refuses to start until then; its docs say how it will wrap `burrow-acp`.
 - **The fake agent** (`burrow_agents::fake`, binary `burrow-fake-agent`) is a scripted agent for tests and for trying Burrow by hand, offered as `fake` when `burrowd` runs with `--dev`. It is a real child process with a child of its own, so it exercises the Job Objects.
 
 #### Muse over MSP
 
-`burrow-msp` is a client for MSP that depends on none of Burrow's crates; the Muse adapter wraps it. What it does, as verified against Muse 1.4.14 on 2026-11-09:
+`burrow-msp` is a client for MSP that depends on none of Burrow's crates; the Muse adapter, `burrow_agents::msp`, wraps it. What it does, as verified against Muse 1.4.14 on 2026-11-09:
 
 - **Wire:** JSON-RPC 2.0 over the process's stdio, one message per line. `initialize`, then the `initialized` notification. Errors carry `data.kind` (such as `commandRejected`) and often `data.reason` (such as `missing_run`).
 - **Types:** written by hand against Muse's own schema export, which is committed in `crates/burrow-msp/schema/`, and checked against it by tests (D-022). `initialize` returns the schema's fingerprint; a different one is logged as a warning.
@@ -175,8 +176,18 @@ None of them needs `authenticate` when its CLI is logged in. Burrow offers them 
 - **Stopping:** `turn/interrupt` and `turn/cancel` end the running turn with terminal `cancelled`. With no turn running, they're refused (`commandRejected`, `missing_run`).
 - **Models:** `model/list` lists the `meta` catalog with prices; `session/setModel` switches. Echo sessions refuse a switch (`invalid_target`).
 - **Limits:** a quota stop is a failed turn whose error has `quota` (`limitKind`, `resetsAtMs`); `authRequired` or `requestDenied` means the provider is unavailable. The development account has no subscription allowance (`muse usage --json` says `no_allowance`), yet `meta` turns complete normally and are billed per token: Muse's system prompt is about 25k input tokens per model call. `usage/read` answers `{}` there, with no `usage` member, and no `usage/changed` arrives.
-- **Shell on Windows:** `initialize` reports `sandboxAvailability: "unavailable"`, and Muse's shell tool fails ("windows elevated sandbox setup has not run") until `muse sandbox setup` has run elevated, or with `muse serve --disable-sandbox`. File tools work.
+- **Shell on Windows:** `initialize` reports `sandboxAvailability: "unavailable"`, and Muse's shell tool fails ("windows elevated sandbox setup has not run") until `muse sandbox windows setup` has run elevated, or with `muse serve --disable-sandbox`. File tools work. `muse sandbox windows check` can say `status=ready` while `initialize` still says `unavailable` and the shell still fails; `initialize` is the one to trust (D-027).
+- **What Muse asks about:** in its default mode, `promptUnmatched`, Muse asks before a shell command it can't sandbox. Commands it can sandbox, file reads (even outside the workspace) and web fetches run without a question (D-027).
 - **Shutdown:** closing Muse's stdin makes it close each session (`session/closed`, reason `hostShutdown`) and exit with code 0.
+
+**The adapter** (`burrow_agents::msp`, D-026, D-027) wraps `burrow-msp` behind the adapter interface:
+- **One `muse serve` per session:** the versioned binary, run by the core launcher in the session's Job Object, with `--disable-request-user-input`. `session/create` takes about half a second.
+- **Events:** message and reasoning text, tool calls (Muse's item id is the tool call id), their output when they finish, and edits as diffs built from the call's arguments. Token usage is summed per turn. The turn ends at Muse's `turn/completed`.
+- **Approvals** become permission requests in the inbox, with Muse's choices as the options (`allow_once`, `allow_local_prefix`, `abort`, …). The answer goes back as `approval/decide`. An approval can arrive before its tool call starts; the tool call is then announced as `pending`.
+- **Cancel** is `turn/interrupt`. **Models** come from `model/list` for the session's provider; an echo session has none. **Usage:** `usage/read` when a session starts, and `usage/changed`, become provider `muse` in `usage/get`; an empty reading is not a limit. A quota failure becomes `limitReached`; `authRequired` and `requestDenied` end the turn with an error that says what to do.
+- **Detection** runs the binary's `--version` and `usage`, and a throwaway echo host for the model catalog and the sandbox's state. A sandbox that isn't set up is the agent's `problem`, while `available` stays true.
+- **For tests:** `BURROW_MUSE_PROVIDER=echo` runs sessions on the free echo provider, memory-only. `BURROW_MUSE_DISABLE_SANDBOX=1` turns the sandbox off, so that Muse asks before shell commands.
+- **Tested** against `burrow-msp`'s recorded transcripts (an approval round trip, an interrupt), through `burrowd` with echo (`crates/burrowd/tests/muse.rs`), and live with `meta` once: a prompt that streamed back, a shell command approved from the inbox, a clean stop.
 
 ### Flow engine
 
@@ -256,9 +267,9 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session`, `inbox`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, entity rows committed with events (D-017), migrations | implemented |
 | `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name, newline-delimited JSON framing (D-013), and the check that a pipe's server runs as the current user | implemented |
-| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection and fake agent done; ACP and MSP in M2 phase 2 |
+| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection, fake agent and the MSP adapter for Muse (D-026) done; ACP in M2 phase 2 |
 | `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; `burrowd` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
-| `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | client done; not yet wrapped as an adapter |
+| `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | done; wrapped by `burrow_agents::msp` |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |
 | `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json`; `cargo xtask icons` renders `assets/icon/*.svg` into the Windows `.ico` files | `schema`, `icons` |

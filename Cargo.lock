@@ -823,6 +823,7 @@ dependencies = [
 name = "burrow-agents"
 version = "0.1.0"
 dependencies = [
+ "burrow-msp",
  "burrow-protocol",
  "futures",
  "serde",

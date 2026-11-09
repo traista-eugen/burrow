@@ -30,6 +30,8 @@ Every decision that shapes the architecture gets an entry here.
 | [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
 | [D-022](#d-022-msp-types-are-written-by-hand-and-checked-against-muses-schema) | MSP types are written by hand and checked against Muse's schema | 2026-11-09 | accepted |
 | [D-023](#d-023-burrow-runs-muses-versioned-binary-not-its-launcher) | Burrow runs Muse's versioned binary, not its launcher | 2026-11-09 | accepted |
+| [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted |
+| [D-027](#d-027-muse-sessions-ask-no-user-input-questions-in-m2-and-keep-their-sandbox) | Muse sessions ask no user-input questions in M2, and keep their sandbox | 2026-11-09 | accepted |
 
 ---
 
@@ -478,3 +480,72 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - Burrow never updates Muse. The user's own `muse` runs do, since the launcher checks hourly.
 - A running binary is locked, so an update can't delete it under a live session. The launcher removes old binaries on a later update.
 - If Muse changes its install layout, `locate_muse` falls back to the launcher and everything still works, just slower.
+
+## D-026 The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events
+
+**Decision.**
+- **Launch.** `burrow_agents::msp` starts one `muse serve` per Burrow session: Muse's versioned binary (D-023), through the core launcher, in the session's Job Object (D-018). The command is `muse-bin-<version>.exe serve --disable-request-user-input` (D-027), in the session's folder. The child's stdio goes to `burrow-msp`'s `MspClient`, which opens the session with `session/start`, then reads `model/list` and `usage/read`.
+- **Turns.** Burrow's turn is the Muse turn named by `turn/start`'s `commandId`, which is a fresh turn's id. The adapter expects that id before it sends `turn/start`, so no event of the turn is missed. Burrow's turn ends only at that turn's `turn/completed`. `session/cancel` sends `turn/interrupt` for it; when Muse says there's no turn to interrupt (`commandRejected`), the turn is already over and its `turn/completed` ends it.
+- **Events.**
+
+  | MSP | Burrow |
+  |---|---|
+  | `item/delta` on an `agentMessage` | `agentMessageChunk`. A later message item of the same turn starts a new paragraph (`\n\n`). A message that arrives whole, in `item/completed`, is sent then. |
+  | `item/delta` `summary.N` on a `reasoning` item | `agentThoughtChunk` |
+  | a `toolCall` item, first seen | `toolCall`, with Muse's item id as the tool call id |
+  | the same item, later | `toolCallUpdate`: the status; on completion the output, or why it failed |
+  | `approval/request` | `toolCall` (`pending`) if the item wasn't seen yet, then a permission request |
+  | `session/tokenUsage` | summed per turn, sent as one `usage` before the turn ends |
+  | `turn/completed` | `turnEnded`: `completed`, `cancelled` (with Muse's reason), or `error` with Muse's message. Tool calls still open are marked `failed` first: Muse completes a turn's items before the turn, so they never ran to the end. |
+  | a failure with `quota` | `limitReached` with `resetsAt`, then `turnEnded` (`limit`) |
+  | a failure that is `authRequired` or `requestDenied` | `turnEnded` (`error`), telling the user to sign in, or that the provider refused |
+  | `session/modelChanged` | `modelChanged` |
+  | `usage/changed`, and `usage/read` when a session starts | provider usage `muse`, for `usage/get` |
+  | `session/closed` other than `hostShutdown` | the session ends, with the reason |
+
+  Items of other turns, `reminderChild` items and `turn/foregroundCompleted` map to nothing.
+- **Diffs.** An edit's content is a `diff` built from the call's arguments, as ACP agents send it: the replaced text and its replacement for `edit_file {path, find, replace}`, the whole text for `write_file {path, content}`. Paths are made absolute against the workspace. A `patchSummary` becomes one line of text.
+- **Approvals.** The options are Muse's `availableChoices`; an option's id is the `choiceId`. Its kind comes from the decision and scope: allow once, allow always (session or saved rule), reject once, reject always. The answer goes back as `approval/decide` with the approval's current requirement. `approval/updated` is tracked, so an answer picks the same choice from refreshed choices. An approval nobody answers (the turn was cancelled, the session stopped) is decided by nobody: `turn/interrupt`, or Muse's exit, settles it.
+- **Usage.** Provider `muse`. A reading becomes `used` and `limit` in percent of the current window, `limited` once the window or the week is used up. An empty reading means Muse observed nothing, which is all an account without an allowance gets. It is reported as not limited, unless a quota failure seen by this `burrowd` hasn't reset yet.
+- **Detection** runs the binary's `--version` and `usage`, plus a throwaway `muse serve --provider echo --no-session-log` that answers `initialize` (its `sandboxAvailability`, D-027) and `model/list`. None of it spends quota; it takes about a second.
+- **Tests.** `BURROW_MUSE_PROVIDER` picks the provider (`echo` is free) and makes sessions memory-only (`--no-session-log`). The adapter is tested against `burrow-msp`'s recorded transcripts, the approval round trip included, and through `burrowd` with `echo`.
+
+**Why.**
+- **One host per session**, although MSP hosts many sessions per process: each session's process tree is then its own Job Object, so stopping one session kills exactly its tools, and a crash takes one session down, not all of them (D-007, D-018). A host costs about half a second to start, plus one process and its console host.
+- **The `commandId` convention** removes a race: `turn/start`'s answer can arrive after the turn's first events.
+- **Item ids as tool call ids:** approvals carry the same `itemId` as the tool call they gate, and they arrive before the item starts.
+- **Diffs from arguments:** Muse 1.4.14's `edit_file` and `write_file` send no stored patch (`patchRef`), only their arguments and a text output with a unified diff. The arguments give exactly what ACP's diff holds.
+- **Tool output at completion:** a tool call update's content replaces the old content, so streaming output deltas would resend the growing output every time.
+
+**Alternatives considered.**
+- **One `muse serve` per `burrowd`**, hosting every Muse session: fewer processes, but no per-session cleanup, and one crash ends every session.
+- **Fetching stored patches** (`item/readOutput` with `patchRef`): no tool sent one in 1.4.14. Left until one does.
+- **Deciding an unanswered approval as "reject":** the interrupt that follows a cancel settles it anyway, and a reject would reach the model as feedback first.
+
+**Consequences.**
+- An edit shows as a replacement, not a whole-file diff. A `write_file` shows as a new file even when it overwrote one.
+- When Muse settles an approval by itself (it timed out, or another client decided), Burrow's inbox item stays open. Answering it then logs a warning and changes nothing. The adapter interface has no event that withdraws a permission request; adding one is a follow-up.
+- Sessions are durable in Muse's own home, and `agentSessionId` is Muse's session id, ready for resuming stopped sessions later (`session/resume`). If Muse unloads an idle session, Burrow's session ends.
+- Turn cost isn't reported: `costUsd` is absent, although `model/list` has list prices.
+
+## D-027 Muse sessions ask no user-input questions in M2, and keep their sandbox
+
+**Decision.**
+- **User input.** Burrow starts `muse serve` with `--disable-request-user-input`, so Muse's model can't ask the user questions (`request_user_input`). A question that arrives anyway is declined at once with `userInput/cancel`. Mapping questions to inbox `question` items is a follow-up, alongside M5's human-feedback steps.
+- **The sandbox.** Burrow never passes `--disable-sandbox` on its own. Detection reports the sandbox's state in `AgentInfo.problem`, with the fix: run `muse sandbox windows setup` in an elevated terminal. `available` stays true, because Muse's other tools work.
+  - The state comes from `muse serve`'s `initialize` (`sandboxAvailability`), not from `muse sandbox windows check`.
+  - `BURROW_MUSE_DISABLE_SANDBOX=1` passes `--disable-sandbox`, with a warning in the log. It is for tests: the live test uses it to get an approval to answer.
+
+**Why.**
+- An unanswered question blocks the turn until Muse times it out. The inbox has no question items or answer forms yet. A question doesn't fit a permission request either: Muse asks up to three questions, some with several answers.
+- The sandbox is what makes Muse's unattended shell commands safe. Turning it off quietly would change what the user agreed to.
+- **What was observed on 2026-11-09**, with Muse 1.4.14 and the session in `promptUnmatched` mode, Muse's default:
+  - `muse sandbox windows check` said `status=ready`, while `initialize` said `sandboxAvailability: "unavailable"`. The shell tool failed with "windows elevated sandbox setup has not run", so `initialize` was right.
+  - Earlier the same day, before something changed the sandbox's state, Muse asked before running `echo` in the shell. Afterwards it ran shell commands without asking, as sandboxed commands, and they failed at once.
+  - Reading a file outside the workspace and fetching a web page ran without a question. Asked to write a file outside the workspace, the model made eight tool calls in four minutes, none of them asked about, and didn't finish.
+  - With `--disable-sandbox`, Muse asked before `Set-Content`, and after the approval the command ran.
+
+**Consequences.**
+- On a machine whose sandbox setup isn't finished, Muse's shell tool fails in Burrow sessions, with the reason in the tool call's output. `agent/list` says what to run.
+- With a working sandbox, Muse asks only about what it can't sandbox. So Burrow's inbox sees fewer questions from Muse than from the ACP agents.
+- M2's "approve a permission request from the inbox" check for Muse needs `BURROW_MUSE_DISABLE_SANDBOX=1` on `burrowd`, or a command Muse can't sandbox.

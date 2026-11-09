@@ -10,8 +10,9 @@
 //!   Windows shims on `PATH`, and hands the child's stdin and stdout to a protocol client.
 //! - [`detect`]: version, login state and models of Claude Code, Codex, Cursor and Muse.
 //! - [`fake`]: the scripted fake agent, a real child process, for tests and `burrowd --dev`.
-//! - [`acp`] and [`msp`]: slots for the ACP and MSP adapters, which M2's phase 2 builds on the
-//!   `burrow-acp` and `burrow-msp` clients. Today they detect their agents and refuse to start.
+//! - [`msp`]: the MSP adapter, which runs Muse Code sessions on the `burrow-msp` client (D-026).
+//! - [`acp`]: the slot for the ACP adapter, which M2's phase 2 builds on the `burrow-acp`
+//!   client. Today it detects its agents and refuses to start.
 //! - [`registry`]: the set of adapters `burrowd` offers.
 //!
 //! The crate knows nothing about streams, inbox items or `burrowd`'s state: the session manager
