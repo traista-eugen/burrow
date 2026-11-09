@@ -1,5 +1,5 @@
-#define RT_MANIFEST 24
-1 RT_MANIFEST "resources/windows/burrow.manifest.xml"
+
+
 
 // Icon 1 is the exe's icon in Explorer, and GPUI loads it for every window (title bar, taskbar,
 // Alt+Tab). Generated from assets/icon/*.svg by `cargo xtask icons`.

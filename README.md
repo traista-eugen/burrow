@@ -43,6 +43,17 @@ And in a third, append an event; the tail prints it:
 cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"session","id":"ses_1","title":"Hello"}'
 ```
 
+### Run the desktop app
+
+`cargo run -p burrow-app` opens Burrow. It connects to your `burrowd`, starting `burrowd.exe` from next to `burrow.exe` if nothing serves the pipe (D-029). To try it against a separate, throwaway `burrowd` with the fake agents:
+
+```powershell
+cargo build --workspace
+target\debugurrow.exe --pipe burrow-try --burrowd-args "--dev --data-dir $env:TEMPurrow-try"
+```
+
+On another pipe the app starts `burrowd` only when given `--burrowd-args` (or `BURROWD_ARGS`); `BURROW_PIPE` works like `--pipe`. Keys: Ctrl+N new session, Ctrl+L focus the prompt, Ctrl+I inbox, Ctrl+O add a project, Esc stops a turn.
+
 ### Try a session with the fake agent
 
 With `--dev`, `burrowd` also offers `fake`: a scripted agent that runs as a real process and spends no quota. Start `burrowd --dev` as above, then:

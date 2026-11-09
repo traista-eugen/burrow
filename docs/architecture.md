@@ -87,7 +87,7 @@ Flags:
 
 ### Clients
 
-- **Desktop app**: `burrow.exe`, built with GPUI. This is the main UI.
+- **Desktop app**: `burrow.exe`, built with GPUI and gpui-component (D-028). This is the main UI. It starts `burrowd` when nothing serves the pipe and resumes its streams after reconnecting (D-029); `crates/burrow-app/src/views/mod.rs` describes its layout.
 - **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list|install`, `usage`, `session new|list|prompt|watch|cancel|model|mode|stop|archive`, `inbox list|respond`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`.
 - **Phone app**: for remote control. The technology isn't decided yet ([plan.md](plan.md#open-decisions)).
 
@@ -249,7 +249,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 - **No console windows:** agent processes start with `CREATE_NO_WINDOW`. Each still gets a hidden `conhost.exe`, inside its job.
 - **Sleep:** while any session is `working`, `burrowd` asks Windows not to sleep (`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`, held by a dedicated thread). A session `waiting` on a human doesn't count, so a forgotten question doesn't keep the PC awake for days. Runs will count too, from M5.
 - **WSL:** a session can run inside a WSL distro (`wsl.exe -d <distro> --`), with path translation between Windows and Linux.
-- **App manifest:** enables per-monitor DPI, long paths (over 260 characters) and UTF-8 as the code page (D-010).
+- **App manifest:** GPUI's: per-monitor DPI, Common Controls v6, the segment heap (D-028).
 - **Icons:** the sources are SVGs in `assets/icon/`, and `cargo xtask icons` renders them into committed `.ico` files.
   - `burrow.exe` embeds `burrow.ico` as icon resource 1. Explorer shows it, and GPUI loads it for every window: title bar, taskbar and Alt+Tab. Sizes 16–24 px come from a simplified drawing (`burrow-small.svg`).
   - `burrowd` gets two tray glyphs, `tray-dark-theme.ico` (white) and `tray-light-theme.ico` (near-black). It should pick one by the taskbar theme (`SystemUsesLightTheme`). Nothing loads them yet.
@@ -271,7 +271,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 |---|---|---|---|
 | `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; schema export |
 | `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel` |
-| `burrow-app` | bin `burrow` | GPUI desktop client | empty window |
+| `burrow-app` | bin `burrow` | GPUI desktop client, on gpui-component (D-028) | M3 shell: connects and starts `burrowd` (D-029); sidebar, inbox panel, new session page, basic session view; state and views split as in D-030 |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | Connect (checking the pipe's server is the current user), handshake, typed and cancellable calls, notifications, resumable subscriptions; runs on any executor (D-016) |
 | `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session`, `inbox`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, entity rows committed with events (D-017), migrations | implemented |

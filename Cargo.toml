@@ -27,9 +27,15 @@ burrow-transport = { path = "crates/burrow-transport" }
 burrow-client = { path = "crates/burrow-client" }
 burrow-agents = { path = "crates/burrow-agents" }
 burrow-acp = { path = "crates/burrow-acp" }
-# Default features minus `windows-manifest`: burrow-app embeds its own manifest
-# (adds long-path + UTF-8 code page), and two manifests fail to link.
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# GPUI, as the `gpui-pre` snapshot that gpui-component is built on (D-028). These four are
+# pinned exactly and upgraded together. On Windows, `gpui_platform` turns on GPUI's
+# `windows-manifest` feature, so GPUI's manifest is burrow.exe's (D-028 replaces D-010).
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-features = false, features = ["font-kit"] }
+# Widgets for the desktop app: text input, markdown, lists, dialogs, themes (D-028).
+gpui-component = "=0.9.1"
+# gpui-component's bundled Lucide icons, registered as the app's asset source.
+gpui-kit-assets = "=0.9.1"
 # Serialization, shared by every crate. Crates enable extra features themselves,
 # e.g. serde_json's raw_value in burrow-store.
 serde = { version = "1.0.229", features = ["derive"] }
