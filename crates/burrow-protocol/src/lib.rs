@@ -16,7 +16,7 @@
 //! - [`events`]: streams, `events/subscribe`, `events/unsubscribe`, `events/event` and the
 //!   [`Event`] payloads.
 //! - [`project`]: `project/*` and [`Project`].
-//! - [`agent`]: `agent/list`, `agent/refresh`, `usage/get`, [`AgentInfo`] and [`AgentId`].
+//! - [`agent`]: `agent/list`, `agent/refresh`, `agent/install`, `usage/get`, [`AgentInfo`] and [`AgentId`].
 //! - [`session`]: `session/*`, [`Session`], [`ContentBlock`] and the session events.
 //! - [`inbox`]: `inbox/*` and [`InboxItem`].
 //! - [`artifact`]: references to files in the artifact store, [`ArtifactRef`].
@@ -55,7 +55,8 @@ pub mod session;
 pub mod time;
 
 pub use agent::{
-    AgentId, AgentInfo, AgentLogin, Integration, LoginState, ModelInfo, ProviderUsage, UsageSource,
+    AdapterInfo, AgentId, AgentInfo, AgentInstallParams, AgentLogin, Integration, LoginState,
+    ModelInfo, ProviderUsage, UsageSource,
 };
 pub use artifact::ArtifactRef;
 pub use connection::{
@@ -85,13 +86,14 @@ pub use project::{
 };
 pub use schema::{schema, schema_json};
 pub use session::{
-    AgentMessageChunk, AgentThoughtChunk, ContentBlock, LimitInfo, LimitReached, ModelChanged,
-    PermissionOption, PermissionOptionKind, PermissionRequested, PermissionResolved, Plan,
-    PlanEntry, PlanEntryPriority, PlanEntryStatus, Session, SessionCreateParams, SessionIdParams,
-    SessionListParams, SessionMode, SessionPromptParams, SessionPromptResult,
-    SessionSetModelParams, SessionState, SessionSummary, SessionUsage, StateChanged,
-    TerminalOpened, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolKind, TurnEndReason, TurnEnded, Usage, UserMessage,
+    AgentMessageChunk, AgentMode, AgentModeChanged, AgentThoughtChunk, ContentBlock, LimitInfo,
+    LimitReached, ModelChanged, PermissionOption, PermissionOptionKind, PermissionRequested,
+    PermissionResolved, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, Session,
+    SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
+    SessionPromptResult, SessionSetAgentModeParams, SessionSetModelParams, SessionState,
+    SessionSummary, SessionUsage, StateChanged, TerminalOpened, ToolCall, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind, TurnEndReason, TurnEnded, Usage,
+    UserMessage,
 };
 pub use time::Timestamp;
 

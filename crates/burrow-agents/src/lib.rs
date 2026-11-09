@@ -10,8 +10,10 @@
 //!   Windows shims on `PATH`, and hands the child's stdin and stdout to a protocol client.
 //! - [`detect`]: version, login state and models of Claude Code, Codex, Cursor and Muse.
 //! - [`fake`]: the scripted fake agent, a real child process, for tests and `burrowd --dev`.
-//! - [`acp`] and [`msp`]: slots for the ACP and MSP adapters, which M2's phase 2 builds on the
-//!   `burrow-acp` and `burrow-msp` clients. Today they detect their agents and refuse to start.
+//! - [`acp`]: the ACP adapter for Claude Code, Codex and Cursor, built on `burrow-acp`: launching,
+//!   installing the pinned npm adapters, modes, the event mapping, the stuck-turn watchdog, and
+//!   a scripted fake ACP agent (`burrow-fake-acp-agent`).
+//! - [`msp`]: the slot for the MSP adapter, built on `burrow-msp`.
 //! - [`registry`]: the set of adapters `burrowd` offers.
 //!
 //! The crate knows nothing about streams, inbox items or `burrowd`'s state: the session manager
@@ -26,7 +28,7 @@ pub mod msp;
 pub mod registry;
 
 pub use adapter::{
-    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply,
-    PermissionRequest, SessionConfig, StartedSession,
+    AgentAdapter, AgentError, AgentEvent, AgentModes, AgentSession, PermissionOutcome,
+    PermissionReply, PermissionRequest, SessionConfig, StartedSession,
 };
-pub use registry::Registry;
+pub use registry::{Registry, RegistryOptions};

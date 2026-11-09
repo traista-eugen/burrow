@@ -1,5 +1,35 @@
 {
   "$defs": {
+    "AdapterInfo": {
+      "description": "An npm package that connects an agent to ACP, installed by Burrow at a pinned version.",
+      "properties": {
+        "installed": {
+          "description": "Whether that version is installed.",
+          "type": "boolean"
+        },
+        "package": {
+          "description": "The npm package, for example `@agentclientprotocol/claude-agent-acp`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The folder it is, or will be, installed in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The pinned version Burrow runs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package",
+        "version",
+        "installed"
+      ],
+      "type": "object"
+    },
     "AgentId": {
       "description": "Which agent: the four Burrow drives, plus a scripted fake for tests.",
       "oneOf": [
@@ -42,9 +72,27 @@
     "AgentInfo": {
       "description": "What `burrowd` found out about one agent.",
       "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The ACP adapter Burrow installs and runs for this agent, when it needs one (Claude Code and Codex). `agent/install` installs it."
+        },
         "available": {
           "description": "Whether `session/create` can start this agent now.",
           "type": "boolean"
+        },
+        "defaultAgentMode": {
+          "description": "The agent mode Burrow starts sessions in when `session/create` doesn't name one, for example Claude Code's `default`. Absent when Burrow keeps the agent's own default.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "detectedAt": {
           "$ref": "#/$defs/Timestamp",
@@ -110,6 +158,19 @@
       ],
       "type": "object"
     },
+    "AgentInstallParams": {
+      "description": "`agent/install` params.",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentId",
+          "description": "The agent whose adapter to install."
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "type": "object"
+    },
     "AgentLogin": {
       "description": "An agent CLI's login state.",
       "properties": {
@@ -156,6 +217,50 @@
         "type",
         "turnId",
         "text"
+      ],
+      "type": "object"
+    },
+    "AgentMode": {
+      "description": "One of an agent's own modes, such as \"ask before edits\" or \"plan only\".",
+      "properties": {
+        "description": {
+          "description": "What the mode does, as the agent describes it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The id to pass as `agentMode`, for example `read-only`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "A display name, for example `Read Only`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "AgentModeChanged": {
+      "description": "`agentModeChanged`: the agent now runs in another of its modes, because `session/setAgentMode` asked or the agent switched by itself.",
+      "properties": {
+        "agentMode": {
+          "description": "The mode's id.",
+          "type": "string"
+        },
+        "type": {
+          "const": "agentModeChanged"
+        }
+      },
+      "required": [
+        "type",
+        "agentMode"
       ],
       "type": "object"
     },
@@ -739,6 +844,9 @@
         },
         {
           "$ref": "#/$defs/ModelChanged"
+        },
+        {
+          "$ref": "#/$defs/AgentModeChanged"
         },
         {
           "$ref": "#/$defs/TerminalOpened"
@@ -1982,6 +2090,20 @@
           "$ref": "#/$defs/AgentId",
           "description": "The agent."
         },
+        "agentMode": {
+          "description": "The agent's own mode, for example Claude Code's `default` or Codex's `read-only`. It decides what the agent asks permission for. Absent when the agent has no modes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentModes": {
+          "description": "The modes `session/setAgentMode` accepts, when the agent has modes.",
+          "items": {
+            "$ref": "#/$defs/AgentMode"
+          },
+          "type": "array"
+        },
         "archived": {
           "description": "Archived sessions leave the default lists.",
           "type": "boolean"
@@ -2092,6 +2214,13 @@
         "agent": {
           "$ref": "#/$defs/AgentId",
           "description": "The agent to start."
+        },
+        "agentMode": {
+          "description": "The agent's own mode to start in, for example `read-only`. When absent, the agent's `defaultAgentMode` from `agent/list`, or else the agent's own default.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "cwd": {
           "description": "The folder the agent works in, as an absolute path. Required without `projectId`.",
@@ -2235,6 +2364,24 @@
       },
       "required": [
         "turnId"
+      ],
+      "type": "object"
+    },
+    "SessionSetAgentModeParams": {
+      "description": "`session/setAgentMode` params.",
+      "properties": {
+        "agentMode": {
+          "description": "The mode's id, one of `Session.agentModes`.",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "The session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "agentMode"
       ],
       "type": "object"
     },
@@ -2805,6 +2952,10 @@
           "description": "Fetches from the network."
         },
         {
+          "const": "switchMode",
+          "description": "Switches the agent's mode, for example out of planning."
+        },
+        {
           "const": "other",
           "description": "Anything else. (Named `Misc` in Rust because `Other` holds unknown values.)"
         },
@@ -2820,6 +2971,7 @@
               "execute",
               "think",
               "fetch",
+              "switchMode",
               "other"
             ]
           },
@@ -2916,6 +3068,7 @@
               "limitReached",
               "stateChanged",
               "modelChanged",
+              "agentModeChanged",
               "terminalOpened"
             ]
           },
@@ -3033,6 +3186,14 @@
       },
       "result": {
         "$ref": "#/$defs/Empty"
+      }
+    },
+    "agent/install": {
+      "params": {
+        "$ref": "#/$defs/AgentInstallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentInfo"
       }
     },
     "agent/list": {
@@ -3200,6 +3361,14 @@
       },
       "result": {
         "$ref": "#/$defs/SessionPromptResult"
+      }
+    },
+    "session/setAgentMode": {
+      "params": {
+        "$ref": "#/$defs/SessionSetAgentModeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
       }
     },
     "session/setModel": {

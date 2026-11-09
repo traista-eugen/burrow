@@ -49,17 +49,23 @@ impl Daemon {
     /// Starts `burrowd` and waits until it accepts clients. With `dev`, it offers only the fake
     /// agent; without, no agents. Either way no real agent CLI is run.
     pub async fn start(data_dir: &Path, pipe: &str, dev: bool) -> Self {
+        let args: &[&str] = if dev {
+            &["--dev", "--agents=fake"]
+        } else {
+            &["--agents="]
+        };
+        Self::start_with(data_dir, pipe, args).await
+    }
+
+    /// Starts `burrowd` with `args` added, and waits until it accepts clients.
+    pub async fn start_with(data_dir: &Path, pipe: &str, args: &[&str]) -> Self {
         let mut command = burrowd();
         command
             .arg("--pipe")
             .arg(pipe)
             .arg("--data-dir")
-            .arg(data_dir);
-        if dev {
-            command.arg("--dev").arg("--agents=fake");
-        } else {
-            command.arg("--agents=");
-        }
+            .arg(data_dir)
+            .args(args);
         let mut daemon = Self {
             child: command.spawn().expect("start burrowd"),
             pipe: pipe.to_owned(),

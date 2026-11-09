@@ -176,6 +176,7 @@ fn describe(event: &Event) -> Option<String> {
             None => format!("[{}]", changed.state),
         },
         Event::ModelChanged(changed) => format!("[model: {}]", changed.model),
+        Event::AgentModeChanged(changed) => format!("[agent mode: {}]", changed.agent_mode),
         Event::TerminalOpened(opened) => format!("[terminal {}]", opened.terminal_id),
         Event::AgentMessageChunk(_) | Event::AgentThoughtChunk(_) => return None,
         other => format!("[{}]", other.type_name()),
@@ -221,6 +222,20 @@ pub fn agent(agent: &AgentInfo) -> String {
         agent.name,
         version
     );
+    if let Some(adapter) = &agent.adapter {
+        let state = if adapter.installed {
+            "installed"
+        } else {
+            "not installed"
+        };
+        line.push_str(&format!(
+            "\n        adapter: {} {} ({state})",
+            adapter.package, adapter.version
+        ));
+    }
+    if let Some(mode) = &agent.default_agent_mode {
+        line.push_str(&format!("\n        sessions start in mode: {mode}"));
+    }
     if !agent.models.is_empty() {
         /// Models listed before the rest are counted; `--json` has them all.
         const SHOWN: usize = 8;
@@ -265,6 +280,18 @@ pub fn session(session: &Session) -> String {
     )];
     if let Some(model) = &session.model {
         lines.push(format!("  model: {model}"));
+    }
+    if let Some(mode) = &session.agent_mode {
+        let others: Vec<&str> = session
+            .agent_modes
+            .iter()
+            .map(|mode| mode.id.as_str())
+            .collect();
+        if others.is_empty() {
+            lines.push(format!("  mode:  {mode}"));
+        } else {
+            lines.push(format!("  mode:  {mode} (of {})", others.join(", ")));
+        }
     }
     lines.push(format!("  cwd:   {}", session.cwd));
     if let Some(reason) = &session.reason {

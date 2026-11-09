@@ -5,10 +5,21 @@ use std::sync::Arc;
 
 use burrow_protocol::{AgentId, AgentInfo};
 
-use crate::acp::AcpAdapter;
+use crate::acp::{self, AcpAdapter};
 use crate::adapter::AgentAdapter;
 use crate::fake::FakeAdapter;
 use crate::msp::MspAdapter;
+
+/// Where the standard adapters find what they run.
+#[derive(Clone, Debug, Default)]
+pub struct RegistryOptions {
+    /// The fake agent, `burrow-fake-agent`, for agent `fake`.
+    pub fake_program: Option<PathBuf>,
+    /// The fake ACP agent, `burrow-fake-acp-agent`, for agent `fake-acp`.
+    pub fake_acp_program: Option<PathBuf>,
+    /// Where npm ACP adapters are installed: `%LOCALAPPDATA%\Burrow\agents` by default.
+    pub agents_dir: PathBuf,
+}
 
 /// The agents `burrowd` offers, in display order.
 #[derive(Clone, Default)]
@@ -30,18 +41,21 @@ impl Registry {
         Self { adapters }
     }
 
-    /// The standard adapters for `agents`, in that order. `fake` uses the fake agent at
-    /// `fake_program`; ids without an adapter are skipped.
-    pub fn standard(agents: &[AgentId], fake_program: Option<PathBuf>) -> Self {
+    /// The standard adapters for `agents`, in that order. `fake` and `fake-acp` use the fake
+    /// agents in `options`; ids without an adapter are skipped.
+    pub fn standard(agents: &[AgentId], options: &RegistryOptions) -> Self {
         let adapters = agents
             .iter()
             .filter_map(|id| -> Option<Arc<dyn AgentAdapter>> {
                 Some(match id {
-                    AgentId::Claude => Arc::new(AcpAdapter::claude()),
-                    AgentId::Codex => Arc::new(AcpAdapter::codex()),
+                    AgentId::Claude => Arc::new(AcpAdapter::claude(&options.agents_dir)),
+                    AgentId::Codex => Arc::new(AcpAdapter::codex(&options.agents_dir)),
                     AgentId::Cursor => Arc::new(AcpAdapter::cursor()),
                     AgentId::Muse => Arc::new(MspAdapter),
-                    AgentId::Fake => Arc::new(FakeAdapter::new(fake_program.clone()?)),
+                    AgentId::Fake => Arc::new(FakeAdapter::new(options.fake_program.clone()?)),
+                    AgentId::Other(id) if id == acp::FAKE_ACP_ID => {
+                        Arc::new(AcpAdapter::fake(options.fake_acp_program.clone()?))
+                    }
                     AgentId::Other(_) => return None,
                 })
             })

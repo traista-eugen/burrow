@@ -26,10 +26,12 @@ Every decision that shapes the architecture gets an entry here.
 | [D-017](#d-017-current-state-lives-in-entity-rows-committed-with-its-events) | Current state lives in entity rows, committed with its events | 2026-11-09 | accepted |
 | [D-018](#d-018-one-adapter-interface-agent-processes-in-job-objects-and-a-fake-agent-that-is-a-real-process) | One adapter interface, agent processes in Job Objects, and a fake agent that is a real process | 2026-11-09 | accepted |
 | [D-019](#d-019-requests-run-concurrently-and-cancel-is-honoured) | Requests run concurrently, and `$/cancel` is honoured | 2026-11-09 | accepted |
-| [D-020](#d-020-acp-agents-are-launched-directly-npm-adapters-from-a-pinned-burrow-local-install) | ACP agents are launched directly; npm adapters from a pinned, Burrow-local install | 2026-11-09 | accepted |
+| [D-020](#d-020-acp-agents-are-launched-directly-npm-adapters-from-a-pinned-burrow-local-install) | ACP agents are launched directly; npm adapters from a pinned, Burrow-local install | 2026-11-09 | accepted; its `npx` fallback superseded by D-024 |
 | [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
 | [D-022](#d-022-msp-types-are-written-by-hand-and-checked-against-muses-schema) | MSP types are written by hand and checked against Muse's schema | 2026-11-09 | accepted |
 | [D-023](#d-023-burrow-runs-muses-versioned-binary-not-its-launcher) | Burrow runs Muse's versioned binary, not its launcher | 2026-11-09 | accepted |
+| [D-024](#d-024-acp-adapters-are-installed-explicitly-and-sessions-start-in-the-mode-that-asks-before-changes) | ACP adapters are installed explicitly, and sessions start in the mode that asks before changes | 2026-11-09 | accepted |
+| [D-025](#d-025-a-cancelled-turn-that-doesnt-end-is-ended-by-the-adapter-which-restarts-the-agent-into-the-same-session) | A cancelled turn that doesn't end is ended by the adapter, which restarts the agent into the same session | 2026-11-09 | accepted |
 
 ---
 
@@ -478,3 +480,62 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - Burrow never updates Muse. The user's own `muse` runs do, since the launcher checks hourly.
 - A running binary is locked, so an update can't delete it under a live session. The launcher removes old binaries on a later update.
 - If Muse changes its install layout, `locate_muse` falls back to the launcher and everything still works, just slower.
+
+## D-024 ACP adapters are installed explicitly, and sessions start in the mode that asks before changes
+
+**Decision.**
+- **Installing.** `agent/install {agent}` (and `burrowctl agent install <agent>`) installs the pinned npm adapter an agent runs through: `claude-agent-acp` 0.101.0 for Claude Code, `codex-acp` 2.6.0 for Codex. Cursor and Muse need nothing; installing for them is `invalidState`.
+  - npm runs in a Job Object, into `<agents dir>\<adapter>\<version>.installing`, which is renamed to `<version>` only once npm succeeded and the entry point exists. A failed, timed-out or cancelled install never looks installed.
+  - npm runs as `node npm-cli.js` from next to `node.exe`, so no `cmd.exe` sits in between; `npm.cmd` on `PATH` is the fallback.
+  - The agents folder is `%LOCALAPPDATA%\Burrow\agents`, whatever `--data-dir` says, so test and development instances share one install. `burrowd --agents-dir` changes it.
+- **Reporting.** `AgentInfo.adapter` says which package and version an agent needs and whether it is installed. An agent whose adapter is missing is not `available`, and its `problem` names the `burrowctl` command that fixes it. `session/create` on it answers `unavailable` with the same message. Nothing is ever installed implicitly.
+- **No `npx` fallback.** This replaces D-020's "`npx -y <package>@<version>` is a fallback only". `burrow-acp` still builds the `npx` command, for its probe example.
+- **Modes.** Each agent's adapter names the mode a session starts in, chosen because it asks before changes: `default` for Claude Code and `read-only` for Codex. Cursor keeps its own default, `agent`, because none of its modes asks before file edits; it does ask before shell commands. `AgentInfo.defaultAgentMode` reports the choice.
+  - `session/create` takes `agentMode`, `session/setAgentMode` switches modes later, and `agentModeChanged` records every change, including the agent's own (Claude Code leaving `plan` mode). `Session.agentMode` and `Session.agentModes` hold the current mode and the choices. An unknown mode is `-32602`, and fails `session/create`.
+  - They are called agent modes because `mode` already means structured or terminal on `session/create`.
+  - In the adapter interface, modes are default methods of `AgentSession` (`agent_modes`, `set_agent_mode`) and `install` a default method of `AgentAdapter`, so adapters without them, such as Muse's, need no changes.
+
+**Why.**
+- **Explicit installs.** An install downloads 400–500 MB and takes seconds to minutes. Doing it inside `session/create` would stall the request with no progress, fail confusingly offline, and surprise the user with the disk use. D-020 already said detection should offer the install, not do it silently.
+- **No `npx`.** It would download the same package into npm's shared cache on first use, implicitly, needing the network on every start and running `npm.cmd` and `cmd.exe` in front of the adapter (D-020's measurements). With an explicit install there is nothing left for it to cover.
+- **The staging folder.** `npm install` interrupted halfway can leave the entry point in place with dependencies missing, which would look installed.
+- **The default modes.** The live tests showed the permission round trip only happens in some modes. Claude Code starts in the user's own default, which was `auto` (never asks) on the development machine; Codex's default `agent` asks only about what it judges unsafe. A harness that shows you each change before it happens should not inherit whichever mode the user last chose in another tool.
+
+**Alternatives considered.**
+- **Install on first `session/create`,** or keep `npx` as a fallback: see above.
+- **Install during detection:** detection must stay read-only and quick.
+- **One "permission level" of Burrow's own, mapped per agent:** the agents' modes don't line up (Codex has four sandbox levels, Cursor has no "ask before edits" at all), so a Burrow-level abstraction would promise what it can't deliver. Passing the agent's own modes through is honest, and the default covers the common case.
+- **Settings for the default mode:** settings don't exist yet; `agentMode` per session covers it until then.
+
+**Consequences.**
+- On a new machine, Claude Code and Codex show as unavailable until `burrowctl agent install` runs once per pinned version. Upgrading a pinned version (D-020) means installing again.
+- `burrowd --dev` also offers `fake-acp`, a scripted fake ACP agent (`burrow-fake-acp-agent`) whose own default mode never asks and whose Burrow default does, so the tests exercise the mode logic.
+- Cursor sessions never ask before editing files. Users who need that should use Claude Code or Codex.
+
+## D-025 A cancelled turn that doesn't end is ended by the adapter, which restarts the agent into the same session
+
+**Decision.**
+- After `session/cancel`, the ACP adapter's watchdog gives the turn 10 seconds to end.
+- If it hasn't ended by then, the adapter:
+  1. ends the turn itself, as `cancelled`, with a message saying so;
+  2. kills the agent's process tree;
+  3. starts the agent again and reopens the same ACP session with `session/resume`, or with `session/load`, discarding the replayed history;
+  4. sets the session's mode and model again.
+- Prompts sent during the restart wait for it. Everything the old connection says after step 1 is ignored: each connection has a generation, bumped before the old process is killed.
+- If the agent can neither resume nor load sessions, or the restart fails, the session ends `failed` with the reason.
+- The watchdog lives in the ACP adapter, not in the session manager. `burrow-acp`'s 15-second guard for a usage-limit notice whose turn never ends (codex-acp#747) stays as it is.
+
+**Why.**
+- codex-acp 2.6.0 has three open bugs that leave a turn running forever: #641 drops a `session/cancel`, #600 never answers `session/prompt` when its app-server exits mid-turn, and #747 never answers it after some terminal errors. A turn that never ends leaves the session `working` for good, refusing prompts, with keep-awake held.
+- A cancel is the user saying "stop". Killing the process guarantees the agent stops acting, which is what they asked for, while resuming keeps the conversation. Ending the turn without restarting would leave a request in flight whose late answer could end the next turn.
+- Only the cancel path has a bound. A turn that is merely long, such as a tool call running a build, sends no updates for minutes, so a timeout on silence would kill legitimate work.
+
+**Alternatives considered.**
+- **Fail the session after the grace period:** simpler, but loses the conversation for an agent bug.
+- **A watchdog in the session manager:** the stuck request, the connection and the restart are ACP details, and the MSP adapter has different failure modes.
+- **A timeout on every turn, or on silence:** see above.
+
+**Consequences.**
+- Each ACP turn that ignores a cancel costs one agent restart: a new process (under a second to `initialize` in D-020's measurements) plus reopening the session, longer for an agent that replays a long history with `session/load`.
+- Claude Code and Codex support `session/resume`; Cursor supports `session/load`. The fake ACP agent supports `session/resume`, and `crates/burrowd/tests/acp.rs` tests the whole path with a turn that ignores the cancel.
+- A turn that hangs without a cancel still hangs until the user cancels it. Revisit if that turns out to happen without anyone noticing, for example in unattended flow runs (M5).

@@ -88,7 +88,7 @@ Flags:
 ### Clients
 
 - **Desktop app**: `burrow.exe`, built with GPUI. This is the main UI.
-- **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list`, `usage`, `session new|list|prompt|watch|cancel|model|stop|archive`, `inbox list|respond`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`.
+- **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list|install`, `usage`, `session new|list|prompt|watch|cancel|model|mode|stop|archive`, `inbox list|respond`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`.
 - **Phone app**: for remote control. The technology isn't decided yet ([plan.md](plan.md#open-decisions)).
 
 Every client speaks the [client protocol](protocol.md#part-1-client-protocol). Clients hold no state that matters: a client can crash or disconnect without affecting sessions or runs.
@@ -121,7 +121,7 @@ Checked on 2026-11-09, logged in with subscriptions. The npm adapters run their 
 | Codex | `node %LOCALAPPDATA%\Burrow\agents\codex-acp\2.6.0\node_modules\@agentclientprotocol\codex-acp\dist\index.js` | 0.2–0.8 s |
 | Cursor | `%LOCALAPPDATA%\cursor-agent\versions\<newest>\node.exe …\index.js acp` | 0.5–0.9 s |
 
-Each npm adapter is installed into its versioned folder with `npm install --prefix <folder> --omit=dev <package>@<version>` (`NpmAdapter::install_command`). All three agents exit cleanly when their stdin closes.
+Each npm adapter is installed into its versioned folder with `npm install --prefix <folder> --omit=dev <package>@<version>` (`NpmAdapter::install_args`), by `agent/install` (D-024). All three agents exit cleanly when their stdin closes.
 
 **What each agent supports.**
 
@@ -152,15 +152,24 @@ None of them needs `authenticate` when its CLI is logged in. Burrow offers them 
   - The detection is unit-tested with fixtures from the adapters' sources and real reports. No live limit was triggered.
 
 **The adapter interface** (`burrow-agents`, D-018):
-- **`AgentAdapter`** knows one agent. `detect()` returns an `AgentInfo`: installed or not, version, login state, models when cheap, and whether sessions can start. `start({sessionId, cwd, model?})` launches the agent and resolves once it is ready.
-- **A started session** is an `AgentSession` handle, with `prompt`, `cancel`, `set_model` and `stop`, plus a stream of `AgentEvent`s: message and thought text, tool calls and updates, plans, permission requests (each with a reply channel), turn ends, usage, limits (`resetsAt` when known), model changes, and finally `Exited`. The rules adapters follow are in `crates/burrow-agents/src/adapter.rs`.
+- **`AgentAdapter`** knows one agent. `detect()` returns an `AgentInfo`: installed or not, version, login state, models when cheap, and whether sessions can start. `start({sessionId, cwd, model?})` launches the agent and resolves once it is ready. `install()` installs what Burrow manages for the agent, such as a pinned npm adapter; by default there is nothing to install.
+- **A started session** is an `AgentSession` handle, with `prompt`, `cancel`, `set_model`, `agent_modes`, `set_agent_mode` and `stop`, plus a stream of `AgentEvent`s: message and thought text, tool calls and updates, plans, permission requests (each with a reply channel), turn ends, usage, limits (`resetsAt` when known), model and mode changes, and finally `Exited`. The rules adapters follow are in `crates/burrow-agents/src/adapter.rs`.
 - **The session manager** in `burrowd` turns those events into stored session events. Turn ids, inbox items and seqs are its business, not the adapter's.
 
 **The launcher** (`burrow_agents::launcher`) starts every agent process suspended, puts it into its own Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only then lets it run, so nothing it starts escapes. It uses `CREATE_NO_WINDOW`, logs stderr, and hands the child's stdin and stdout to the protocol client. It finds programs the way Windows' shims need: npm's `claude.cmd` rather than `claude.ps1`, Cursor's `agent.cmd` under `%LOCALAPPDATA%\cursor-agent`, with known install folders as a fallback when `burrowd`'s `PATH` is out of date.
 
+**The ACP adapter** (`burrow_agents::acp`, D-024, D-025) runs Claude Code, Codex and Cursor as Burrow sessions:
+- **Launching.** The commands above, through the launcher, so each agent is a process tree in its own Job Object; the child's stdio goes to `burrow-acp`. The npm adapters live in `%LOCALAPPDATA%\Burrow\agents` (`burrowd --agents-dir` changes it). Nothing is installed implicitly and there is no `npx` fallback: `agent/list` reports the adapter (`adapter.installed`), `session/create` answers `unavailable` with the command to run, and `agent/install` runs npm into a staging folder that is renamed into place only when npm succeeded.
+- **Modes.** Each session starts in the mode that asks before changes: `default` for Claude Code, `read-only` for Codex. Cursor keeps its own `agent`, since none of its modes asks before edits. `agentMode` on `session/create` and `session/setAgentMode` pick another; a mode the agent switches to by itself (Claude Code leaving `plan`) arrives as `agentModeChanged`. Modes come from ACP's `modes`, or a config option of category `mode`.
+- **Models.** The session's `models` come from its model config option (or the older `models` field); `session/setModel` and `session/create`'s `model` go through `set_config_option`. A model id the agent doesn't offer is `-32602`.
+- **Mapping.** Text and thought chunks, tool calls and updates (`switch_mode` becomes `switchMode`), plans, permission requests, token usage at the turn's end (with the turn's share of Claude's reported cost), limits with `resetsAt`, Claude's rate-limit status as provider usage for `usage/get`, model and mode changes. A permission request about a tool call the agent never announced gets a `toolCall` first. Commands, session titles and notices are logged, not stored.
+- **Stuck turns (D-025).** After `session/cancel`, a watchdog gives the turn 10 seconds to end. If it hasn't (codex-acp#641 drops cancels; #600 and #747 never answer `session/prompt`), the adapter ends the turn as `cancelled`, kills the process tree, starts the agent again and reopens the same ACP session with `session/resume`, or `session/load` with its replay discarded, then sets the mode and model again. An agent that can do neither, or a restart that fails, ends the session `failed`. `burrow-acp`'s 15-second guard for a limit notice whose turn never ends stays as it is.
+- **The fake ACP agent** (`burrow_agents::acp::fake_agent`, binary `burrow-fake-acp-agent`) speaks real ACP from a script: echo, permissions, limits, slow and hanging turns, plans, its own mode and model switches, crashes. `burrowd --dev` offers it as `fake-acp`; `crates/burrowd/tests/acp.rs` drives the whole adapter with it, and `acp_live.rs` repeats M2's checks against the real agents.
+
 **Status:**
 - **Detection** of all four agents works (see [protocol.md](protocol.md#agents-roles-and-usage)).
-- **ACP and MSP adapters** are M2's phase 2. Their modules, `burrow_agents::acp` and `burrow_agents::msp`, detect the agents and refuse to start until then; their docs say how they will wrap `burrow-acp` and `burrow-msp`.
+- **The ACP adapter** is done, and passed its live tests against Claude Code, Codex and Cursor on 2026-11-09.
+- **The MSP adapter** is M2's phase 2. Its module, `burrow_agents::msp`, detects Muse and refuses to start until then; its docs say how it will wrap `burrow-msp`.
 - **The fake agent** (`burrow_agents::fake`, binary `burrow-fake-agent`) is a scripted agent for tests and for trying Burrow by hand, offered as `fake` when `burrowd` runs with `--dev`. It is a real child process with a child of its own, so it exercises the Job Objects.
 
 #### Muse over MSP
@@ -214,6 +223,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 | What | Where |
 |---|---|
+| ACP adapters Burrow installs | `%LOCALAPPDATA%\Burrow\agents\<adapter>\<version>`, one folder per pinned version (D-020, D-024) |
 | Database: event logs, entities, settings | `%LOCALAPPDATA%\Burrow\burrow.db` (SQLite, WAL mode, every commit synced to disk: D-012). Entity rows hold the current state of projects, sessions and inbox items, written with their events (D-017). |
 | `burrowd` logs | `%LOCALAPPDATA%\Burrow\logs\burrowd.<date>.log` (a new file each day; the last 14 are kept) |
 | Artifacts | `%LOCALAPPDATA%\Burrow\artifacts\<first 2 hex>\<sha256>` |
@@ -250,14 +260,14 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | Crate | Kind | Purpose | Status |
 |---|---|---|---|
 | `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; schema export |
-| `burrowd` | bins `burrowd`, `burrow-fake-agent` | The service, and the scripted fake agent it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel` |
+| `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel` |
 | `burrow-app` | bin `burrow` | GPUI desktop client | empty window |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | Connect (checking the pipe's server is the current user), handshake, typed and cancellable calls, notifications, resumable subscriptions; runs on any executor (D-016) |
 | `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session`, `inbox`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, entity rows committed with events (D-017), migrations | implemented |
 | `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name, newline-delimited JSON framing (D-013), and the check that a pipe's server runs as the current user | implemented |
-| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection and fake agent done; ACP and MSP in M2 phase 2 |
-| `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; `burrowd` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
+| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection, fake agent and the ACP adapter (with its installer, watchdog and fake ACP agent) done; MSP in M2 phase 2 |
+| `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; the ACP adapter in `burrow-agents` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
 | `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | client done; not yet wrapped as an adapter |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |

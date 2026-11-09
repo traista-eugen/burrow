@@ -10,9 +10,11 @@
 //!   directly: [`cursor_command`].
 //! - **Claude Code and Codex** go through npm adapters, installed once into a
 //!   Burrow-owned folder at a pinned version ([`NpmAdapter::install_command`])
-//!   and run as `node <entry point>` ([`NpmAdapter::command`]). `npx -y`
-//!   ([`NpmAdapter::npx_command`]) works too, but is slower to start and
-//!   needs the network the first time.
+//!   and run as `node <entry point>` ([`NpmAdapter::command`]). Burrow
+//!   installs them only when asked (`agent/install`, D-024). `npx -y`
+//!   ([`NpmAdapter::npx_command`]) works too, for tools such as the probe
+//!   example, but is slower to start and needs the network; Burrow itself
+//!   doesn't fall back to it.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -149,14 +151,7 @@ impl NpmAdapter {
 
     /// The script `node` runs.
     pub fn entry_point(&self, agents_dir: &Path) -> PathBuf {
-        let mut path = self.install_dir(agents_dir).join("node_modules");
-        for part in self.package.split('/') {
-            path.push(part);
-        }
-        for part in self.entry.split('/') {
-            path.push(part);
-        }
-        path
+        self.entry_in(&self.install_dir(agents_dir))
     }
 
     /// Whether this version is installed under `agents_dir`.
@@ -167,14 +162,36 @@ impl NpmAdapter {
     /// The command that installs this version under `agents_dir`. `npm` is
     /// `npm.cmd` on Windows. Takes a few seconds and a few hundred MB.
     pub fn install_command(&self, agents_dir: &Path, npm: &Path) -> AgentCommand {
-        AgentCommand::new(npm)
-            .arg("install")
-            .arg("--prefix")
-            .arg(self.install_dir(agents_dir))
-            .arg("--no-fund")
-            .arg("--no-audit")
-            .arg("--omit=dev")
-            .arg(format!("{}@{}", self.package, self.version))
+        let mut command = AgentCommand::new(npm);
+        command.args = self.install_args(&self.install_dir(agents_dir));
+        command
+    }
+
+    /// The arguments to `npm` that install this version with `prefix` as
+    /// its folder, for callers that install into a staging folder first.
+    pub fn install_args(&self, prefix: &Path) -> Vec<OsString> {
+        [
+            OsString::from("install"),
+            OsString::from("--prefix"),
+            prefix.as_os_str().to_owned(),
+            OsString::from("--no-fund"),
+            OsString::from("--no-audit"),
+            OsString::from("--omit=dev"),
+            OsString::from(format!("{}@{}", self.package, self.version)),
+        ]
+        .into()
+    }
+
+    /// The script `node` runs, relative to the install folder.
+    pub fn entry_in(&self, install_dir: &Path) -> PathBuf {
+        let mut path = install_dir.join("node_modules");
+        for part in self.package.split('/') {
+            path.push(part);
+        }
+        for part in self.entry.split('/') {
+            path.push(part);
+        }
+        path
     }
 
     /// The recommended way to start the adapter: `node <entry point>`, from

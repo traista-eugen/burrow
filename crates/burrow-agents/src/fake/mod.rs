@@ -107,6 +107,8 @@ impl AgentAdapter for FakeAdapter {
                     .collect(),
                 available: installed,
                 problem: (!installed).then(|| format!("{} doesn't exist", self.program.display())),
+                adapter: None,
+                default_agent_mode: None,
                 detected_at: Timestamp::now(),
             }
         })

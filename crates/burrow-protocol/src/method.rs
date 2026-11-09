@@ -117,6 +117,8 @@ method_table! {
         AgentList = "agent/list" (Empty) -> Vec<AgentInfo>;
         /// `agent/refresh`: detect the agents again, then list them.
         AgentRefresh = "agent/refresh" (Empty) -> Vec<AgentInfo>;
+        /// `agent/install`: install the pinned ACP adapter an agent needs, then detect it again.
+        AgentInstall = "agent/install" (AgentInstallParams) -> AgentInfo;
         /// `usage/get`: each provider's usage and limit, as last reported.
         UsageGet = "usage/get" (Empty) -> Vec<ProviderUsage>;
         /// `session/list`: sessions, newest first.
@@ -131,6 +133,8 @@ method_table! {
         SessionCancel = "session/cancel" (SessionIdParams) -> Empty;
         /// `session/setModel`: switch the session's model. Returns `{}`.
         SessionSetModel = "session/setModel" (SessionSetModelParams) -> Empty;
+        /// `session/setAgentMode`: switch the agent's own mode. Returns `{}`.
+        SessionSetAgentMode = "session/setAgentMode" (SessionSetAgentModeParams) -> Empty;
         /// `session/stop`: end the agent process and everything it started. Returns `{}`.
         SessionStop = "session/stop" (SessionIdParams) -> Empty;
         /// `session/archive`: stop the session if needed and hide it from default lists.

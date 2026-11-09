@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use burrow_agents::Registry;
-use burrow_protocol::{AgentInfo, ProviderUsage};
-use tracing::info;
+use burrow_agents::{AgentError, Registry};
+use burrow_protocol::{AgentId, AgentInfo, ErrorKind, ErrorObject, ProviderUsage};
+use tracing::{info, warn};
 
 /// The agents `burrowd` offers, what was last detected about them, and the usage they reported.
 #[derive(Debug)]
@@ -57,6 +57,43 @@ impl Agents {
         let agents = self.detect().await;
         *detected = Some(agents.clone());
         agents
+    }
+
+    /// `agent/install`: installs what `agent` needs, such as its pinned ACP adapter, then
+    /// detects it again and updates the cache.
+    pub async fn install(&self, agent: &AgentId) -> Result<AgentInfo, ErrorObject> {
+        let Some(adapter) = self.registry.get(agent) else {
+            return Err(ErrorObject::new(
+                ErrorKind::Unavailable,
+                format!("agent {agent} isn't offered by this burrowd"),
+            ));
+        };
+        info!(agent = %agent, "installing");
+        if let Err(error) = adapter.install().await {
+            warn!(agent = %agent, %error, "installing failed");
+            return Err(match error {
+                AgentError::Unavailable(message) => {
+                    ErrorObject::new(ErrorKind::Unavailable, message)
+                }
+                AgentError::InvalidState(message) => {
+                    ErrorObject::new(ErrorKind::InvalidState, message)
+                }
+                AgentError::Invalid(message) => ErrorObject::invalid_params(message),
+                AgentError::LimitReached { message, resets_at } => {
+                    ErrorObject::limit_reached(message, resets_at)
+                }
+                AgentError::Failed(message) => ErrorObject::internal(message),
+            });
+        }
+        let info = adapter.detect().await;
+        let mut detected = self.detected.lock().await;
+        if let Some(agents) = detected.as_mut()
+            && let Some(cached) = agents.iter_mut().find(|cached| cached.id == info.id)
+        {
+            *cached = info.clone();
+        }
+        info!(agent = %agent, available = info.available, "installed");
+        Ok(info)
     }
 
     async fn detect(&self) -> Vec<AgentInfo> {

@@ -30,19 +30,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use burrow_agents::{
-    AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply, PermissionRequest,
-    SessionConfig,
+    AgentAdapter, AgentError, AgentEvent, AgentSession, PermissionOutcome, PermissionReply,
+    PermissionRequest, SessionConfig,
 };
 use burrow_protocol::{
-    AgentMessageChunk, AgentThoughtChunk, ContentBlock, EntityCreated, EntityKind, EntityRemoved,
-    EntityRenamed, EntityStateChanged, ErrorKind, ErrorObject, Event, InboxAction,
-    InboxActionStyle, InboxItem, InboxItemAdded, InboxItemIdParams, InboxItemKind,
+    AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, ContentBlock, EntityCreated,
+    EntityKind, EntityRemoved, EntityRenamed, EntityStateChanged, ErrorKind, ErrorObject, Event,
+    InboxAction, InboxActionStyle, InboxItem, InboxItemAdded, InboxItemIdParams, InboxItemKind,
     InboxItemResolved, InboxItemStatus, InboxListParams, InboxResolution, InboxRespondParams,
     InboxSource, LimitInfo, LimitReached, ModelChanged, PermissionOptionKind, PermissionRequested,
     PermissionResolved, ProviderUsage, Session, SessionCreateParams, SessionListParams,
-    SessionMode, SessionPromptParams, SessionPromptResult, SessionSetModelParams, SessionState,
-    SessionSummary, StateChanged, StreamName, Timestamp, TurnEndReason, TurnEnded, Usage,
-    UsageSource, UserMessage,
+    SessionMode, SessionPromptParams, SessionPromptResult, SessionSetAgentModeParams,
+    SessionSetModelParams, SessionState, SessionSummary, StateChanged, StreamName, Timestamp,
+    TurnEndReason, TurnEnded, Usage, UsageSource, UserMessage,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -390,6 +390,8 @@ impl Sessions {
             reason: None,
             turn_id: None,
             models: Vec::new(),
+            agent_mode: None,
+            agent_modes: Vec::new(),
             usage: None,
             limit: None,
             archived: false,
@@ -428,12 +430,15 @@ impl Sessions {
             model: params.model.clone(),
         };
         let start = tokio::select! {
-            result = adapter.start(config) => Start::Done(result),
+            result = start_in_mode(adapter.as_ref(), config, params.agent_mode.clone()) => {
+                Start::Done(result)
+            }
             () = cancel.cancelled() => Start::Cancelled,
             () = slot.stop.cancelled() => Start::Stopped,
         };
         let (state, reason, error) = match start {
             Start::Done(Ok(started)) => {
+                let modes = started.session.agent_modes();
                 core.agent = Some(started.session);
                 let mut change = core.begin();
                 change.next.state = SessionState::Idle;
@@ -441,6 +446,10 @@ impl Sessions {
                     change.next.model = started.model;
                 }
                 change.next.models = started.models;
+                if let Some(modes) = modes {
+                    change.next.agent_mode = Some(modes.current);
+                    change.next.agent_modes = modes.available;
+                }
                 core.finish(self, change).await?;
                 let session = core.session.clone();
                 drop(core);
@@ -549,6 +558,19 @@ impl Sessions {
         let slot = self.slot(&params.session_id)?;
         let mut core = slot.core.lock().await;
         core.set_model(self, params.model).await
+    }
+
+    /// `session/setAgentMode`.
+    pub async fn set_agent_mode(
+        &self,
+        params: SessionSetAgentModeParams,
+    ) -> Result<(), ErrorObject> {
+        if params.agent_mode.trim().is_empty() {
+            return Err(ErrorObject::invalid_params("the agent mode is empty"));
+        }
+        let slot = self.slot(&params.session_id)?;
+        let mut core = slot.core.lock().await;
+        core.set_agent_mode(self, params.agent_mode).await
     }
 
     /// `session/stop`: ends the agent's process tree. Stopping a stopped session does nothing.
@@ -858,6 +880,7 @@ impl Core {
                 Ok(())
             }
             AgentEvent::ModelChanged(model) => self.model_changed(ctx, model).await,
+            AgentEvent::AgentModeChanged(mode) => self.agent_mode_changed(ctx, mode).await,
             AgentEvent::Exited { error } => {
                 self.agent = None;
                 let mut change = self.begin();
@@ -1168,6 +1191,39 @@ impl Core {
         self.finish(ctx, change).await
     }
 
+    async fn set_agent_mode(&mut self, ctx: &Sessions, mode: String) -> Result<(), ErrorObject> {
+        let Some(agent) = &self.agent else {
+            return Err(ErrorObject::new(
+                ErrorKind::InvalidState,
+                format!("the session is {}", self.session.state),
+            ));
+        };
+        agent
+            .set_agent_mode(mode.clone())
+            .await
+            .map_err(agent_error)?;
+        self.agent_mode_changed(ctx, mode).await
+    }
+
+    async fn agent_mode_changed(
+        &mut self,
+        ctx: &Sessions,
+        mode: String,
+    ) -> Result<(), ErrorObject> {
+        if self.session.agent_mode.as_deref() == Some(mode.as_str()) {
+            return Ok(());
+        }
+        let mut change = self.begin();
+        change.commit.event(
+            &self.stream,
+            AgentModeChanged {
+                agent_mode: mode.clone(),
+            },
+        );
+        change.next.agent_mode = Some(mode);
+        self.finish(ctx, change).await
+    }
+
     /// Ends the agent's process tree and marks the session `stopped`.
     async fn stop(&mut self, ctx: &Sessions, reason: &str) -> Result<(), ErrorObject> {
         let Some(agent) = self.agent.take() else {
@@ -1310,6 +1366,28 @@ async fn pump(
     }
 }
 
+/// Starts the agent, then switches it to the mode `session/create` asked for. If that fails, the
+/// agent is stopped again.
+async fn start_in_mode(
+    adapter: &dyn AgentAdapter,
+    config: SessionConfig,
+    mode: Option<String>,
+) -> Result<burrow_agents::StartedSession, AgentError> {
+    let started = adapter.start(config).await?;
+    let Some(mode) = mode else {
+        return Ok(started);
+    };
+    let current = started.session.agent_modes().map(|modes| modes.current);
+    if current.as_deref() == Some(mode.as_str()) {
+        return Ok(started);
+    }
+    if let Err(error) = started.session.set_agent_mode(mode).await {
+        started.session.stop().await;
+        return Err(error);
+    }
+    Ok(started)
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -1322,6 +1400,7 @@ fn agent_error(error: AgentError) -> ErrorObject {
     match error {
         AgentError::Unavailable(message) => ErrorObject::new(ErrorKind::Unavailable, message),
         AgentError::InvalidState(message) => ErrorObject::new(ErrorKind::InvalidState, message),
+        AgentError::Invalid(message) => ErrorObject::invalid_params(message),
         AgentError::LimitReached { message, resets_at } => {
             ErrorObject::limit_reached(message, resets_at)
         }
