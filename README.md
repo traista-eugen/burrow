@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app runs sessions: a sidebar of projects and sessions, an inbox, a new session page that picks the agent, model and agent mode, and a session view with a model and mode picker, usage, limits and the prompt box; its transcript is being rebuilt. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app runs sessions: a sidebar of projects and sessions, an inbox, a new session page that picks the agent, model and agent mode, and a session view with a model and mode picker, usage, limits, the prompt box, and a transcript that streams markdown and shows tool calls and diffs. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 

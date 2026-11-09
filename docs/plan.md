@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0, M1 and M2 done; M3 is next. Last updated 2026-11-09.
+> **Status:** M0, M1 and M2 done. M3 is built; its "done when" is the user's everyday-use verdict. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -18,7 +18,7 @@ Every milestone ends with something you can run.
 | M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
 | M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ✅ done |
 | M2 | Agent sessions | All four agents, driven through one event model | ✅ done |
-| M3 | Desktop app v1 | Usable every day for chatting with agents | |
+| M3 | Desktop app v1 | Usable every day for chatting with agents | built; in everyday trial |
 | M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
 | M5 | Flow engine core | YAML flows run durably, with custom steps | |
 | M6 | GitHub and `deliver-issue` | Issue to merged PR, end to end | |
@@ -133,7 +133,7 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
   | Lists and agents loaded | 141 ms | 201 ms |
   | Working set / private bytes | 62 / 93 MB | 63 / 93 MB |
 
-  With the 3 long sessions open as well (4,206 events): working set 169 MB, private bytes 204 MB, so about 36 MB per open session of about 1,400 events. Run with the transcripts given an empty store, the same three cost 7 MB together: nearly all of it is the current transcript view, which the transcript rebuild should bring down (re-measure with `cargo xtask measure`). The target, under 300 ms to the first frame, is met. `burrow.exe` is 25.1 MB.
+  With the 3 long sessions open as well, the basic transcript took 169 MB (about 36 MB per open session of about 1,400 events). Re-measured after the transcript rebuild (D-033) on the merged tree, 2026-11-09: first frame 128 ms with `burrowd` running and 130 ms when the app starts it; 62 MB working set with the sidebar alone; **72.6 MB working set, 101.7 MB private, with the 3 long sessions open (4,198 events)**, so about 3.5 MB per open long session. The target, under 300 ms to the first frame, is met. `burrow.exe` is 27.1 MB.
 - [x] **The backend for the app** (additive protocol changes; see protocol.md's revision notes):
   - [x] **The sidebar:** sessions take their title from the first prompt, and `session/rename` changes it. `lastActivityAt` on `Session` and `SessionSummary` says when a turn last started or ended, and `session/list` returns the most recently active first. Every state or activity change is on the `index` as `entityStateChanged` with `lastActivityAt`, so the sidebar re-sorts without a `session/get`.
   - [x] **The mode picker:** Muse's approval modes are its agent modes, starting in `promptUnmatched` (D-031), so `session/setAgentMode` works for all four agents' modes. Cursor has modes but keeps its own default (D-024).
@@ -144,6 +144,8 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
 - [x] **M2's follow-ups:** Muse's approval modes as agent modes; withdrawn permission requests; Cursor's model ids (`agent models` listed ids its sessions refuse); `burrowctl agent list` showing an available agent's `problem`, such as Muse's sandbox note.
 
 **Done when** you prefer Burrow over the agents' own TUIs for everyday chats.
+
+Everything above is built and was checked by eye on the merged release build (2026-11-09): the app starts against a `burrowd`, lists sessions, renders a fake session's plan, tool cards, collapsed reads, thoughts and highlighted code, scrolls with "Jump to latest", and replays a real Claude Code session from M2 (answer, shell tool card, approved permission, costs, stopped state) without duplicated text. What remains is the verdict, which only daily use can give.
 
 ## M4: Terminal sessions
 
