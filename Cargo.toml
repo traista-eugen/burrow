@@ -9,6 +9,7 @@ members = [
     "crates/burrow-client",
     "crates/burrowctl",
     "xtask",
+    "crates/burrow-msp",
 ]
 
 [workspace.package]
@@ -50,6 +51,8 @@ windows-sys = "0.61.2"
 # `cargo xtask icons`: SVG to PNG. Same version GPUI already uses; no text or
 # embedded raster images in our icons, so their features stay off.
 resvg = { version = "0.45.1", default-features = false }
+# Muse Code's MSP client.
+burrow-msp = { path = "crates/burrow-msp" }
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.

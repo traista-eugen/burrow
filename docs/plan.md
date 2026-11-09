@@ -71,7 +71,7 @@ Every milestone ends with something you can run.
   - [ ] Cursor: `agent acp`
   - [ ] Claude Code: `@agentclientprotocol/claude-agent-acp`
   - [ ] Codex: `@agentclientprotocol/codex-acp`
-- [ ] **MSP adapter for Muse** (`muse serve`). Generate its types from `muse schema`, and test with `--provider echo`.
+- [ ] **MSP adapter for Muse** (`muse serve`). Its types are written by hand and checked against the committed `muse schema` export (D-022); tests use `--provider echo`. The client crate, `burrow-msp`, is done; wrapping it behind the adapter interface remains.
 - [ ] **Session methods and events:** sessions are stored as `session:<id>` streams.
 - [ ] **Permission requests become inbox items**, answered through `inbox/respond`.
 - [ ] **Job Objects** for every agent process. Keep Windows awake while sessions are working.

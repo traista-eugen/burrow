@@ -20,6 +20,7 @@ cargo build --workspace
 cargo run -p burrow-app     # desktop app (burrow.exe)
 cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
 cargo xtask icons           # regenerate the .ico files from assets/icon/*.svg
+cargo test -p burrow-msp    # the Muse client; drives `muse serve --provider echo` if Muse is installed
 ```
 
 Try the service and the command-line client. Start `burrowd` in one terminal; `--dev` enables `debug/append`:
