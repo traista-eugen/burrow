@@ -85,13 +85,55 @@ Each adapter does two jobs:
 
 | Agent | Integration | Notes |
 |---|---|---|
-| Claude Code | ACP through `@agentclientprotocol/claude-agent-acp` (npm) | Wraps the Claude Agent SDK. Before distributing Burrow, check Anthropic's terms: third-party products are expected to use API keys rather than claude.ai login unless approved. |
-| Codex | ACP through `@agentclientprotocol/codex-acp` (npm) | Fallback if the adapter falls behind: `codex app-server`, Codex's own JSON-RPC server. |
+| Claude Code | ACP through `@agentclientprotocol/claude-agent-acp` 0.101.0 (npm) | Wraps the Claude Agent SDK. Before distributing Burrow, check Anthropic's terms: third-party products are expected to use API keys rather than claude.ai login unless approved. |
+| Codex | ACP through `@agentclientprotocol/codex-acp` 2.6.0 (npm) | The adapter runs `codex app-server` itself. A direct app-server adapter is the fallback if Burrow needs Codex's structured rate limits. |
 | Cursor | ACP, built in: `agent acp` | Log in with `agent login` or set `CURSOR_API_KEY`. |
 | Muse Code | MSP, Meta's own protocol, through `muse serve` | `muse schema` exports the exact schema. `--provider echo` runs without spending tokens, which suits tests. `usage/read` reports the remaining subscription allowance. |
 | Any other CLI | Terminal (ConPTY) | The universal fallback. Burrow sees only the screen, not structure. |
 
-The ACP side uses the `agent-client-protocol` Rust crate. The two npm adapters need Node.js.
+The ACP side is the `burrow-acp` crate, built on the `agent-client-protocol` SDK (5.0.0). The two npm adapters need Node.js 22 or later.
+
+#### ACP agents, as verified
+
+Checked on 2026-11-09, logged in with subscriptions. The npm adapters run their bundled agents: Claude Code 2.1.318 (through Claude Agent SDK 0.3.318) and Codex 0.166.0. The installed CLIs, Claude Code 2.1.319 and Codex 0.167.0, provide the logins. Cursor is CLI 2026.11.05. `cargo run -p burrow-acp --example probe -- <claude|codex|cursor>` repeats the check without a prompt. The live tests (`cargo test -p burrow-acp --test live -- --ignored`) prompt each agent and approve a permission request.
+
+**Launch commands (D-020).** `burrow_acp::launch` builds them.
+
+| Agent | Command | Spawn to `initialize` answer |
+|---|---|---|
+| Claude Code | `node %LOCALAPPDATA%\Burrow\agents\claude-agent-acp\0.101.0\node_modules\@agentclientprotocol\claude-agent-acp\dist\index.js` | 0.3–0.5 s |
+| Codex | `node %LOCALAPPDATA%\Burrow\agents\codex-acp\2.6.0\node_modules\@agentclientprotocol\codex-acp\dist\index.js` | 0.2–0.8 s |
+| Cursor | `%LOCALAPPDATA%\cursor-agent\versions\<newest>\node.exe …\index.js acp` | 0.5–0.9 s |
+
+Each npm adapter is installed into its versioned folder with `npm install --prefix <folder> --omit=dev <package>@<version>` (`NpmAdapter::install_command`). All three agents exit cleanly when their stdin closes.
+
+**What each agent supports.**
+
+| | Claude Code | Codex | Cursor |
+|---|---|---|---|
+| `agentInfo` | `@agentclientprotocol/claude-agent-acp` 0.101.0 | `@agentclientprotocol/codex-acp` 2.6.0 | not sent |
+| `session/load`, `session/list` | yes | yes | yes |
+| `session/resume`, `session/close` | yes | yes | no |
+| `authMethods` | none | `api-key`, `chat-gpt` | `cursor_login` |
+| Modes | `default` (always ask), `acceptEdits`, `plan`, `auto`, `bypassPermissions`; starts in the user's configured default | `read-only`, `workspace-write`, `agent` (auto review, the default), `agent-full-access`. Separately: collaboration mode `default` or `plan` | `agent` (default), `plan`, `ask` |
+| Model choice | config option `model` (aliases such as `opus`, `sonnet`, plus full ids) | config option `model`, plus `reasoning_effort`. Also the older `models` field and `session/set_model` | config option `model`, ids with parameters such as `gpt-5.5[context=272k,reasoning=medium,fast=false]`. Also the older `models` field |
+| Asks permission before | edits and commands, in `default` mode | edits and commands, in `read-only` mode | shell commands only. Never file edits |
+| Token usage at turn end | yes | yes | no |
+| Prompt content | text, image, embedded resources | text, image, embedded resources | text, image |
+| Usage limit | the notice as reply text, then `session/prompt` fails: `-32603`, `data.errorKind: "rate_limit"`. Text such as "You've hit your 5-hour limit · resets 3pm (Europe/Bucharest)". The same `errorKind` also marks short-lived 429s, which are not usage limits | the notice as reply text, then `session/prompt` fails: `-32603`, `data.codexErrorInfo: "usageLimitExceeded"`. Text such as "… try again at 3:05 PM." (local time, no zone). The turn sometimes never ends (codex-acp#747) | only the reply "Upgrade your plan to continue" (or "Add a payment method to continue"), then a normal `end_turn`. No reset time. The same text appears when the chosen model isn't on the plan |
+| Quota outside errors | sometimes `usage_update._meta["_claude/rateLimit"]` (status, `resetsAt`, window, utilization). It is dropped at the start of a turn (claude-agent-acp#1127) | none over ACP (codex-acp#227); app-server has it | none |
+
+None of them needs `authenticate` when its CLI is logged in. Burrow offers them no client capabilities (D-021).
+
+**How `burrow-acp` behaves.**
+- **Its own types.** The SDK had five major versions in 2026, so the crate maps ACP into its own types and phase 2 never touches the SDK's.
+- **Lenient parsing.** Requests and `session/update` go through the SDK untyped and are parsed by the crate. An update kind it doesn't know, or one that doesn't parse, becomes `SessionEvent::Other` with the raw JSON. With the SDK's typed handlers, one such update would fail the connection.
+- **One ordered stream.** Session events, permission requests and the end of each turn reach the caller on one ordered stream. The turn's end always comes after its last update.
+- **Answering permission requests.** A permission request waits until the caller answers. It is answered "cancelled" if dropped, and when its turn is cancelled, as ACP requires.
+- **Usage limits.** `burrow_acp::limit` turns all of the above into `AcpError::LimitReached`, with a `LimitInfo { message, resets_at }`. A `SessionEvent::LimitReached` comes just before the turn's end, which phase 2 maps to the `limitReached` session event. The structured markers come first. The text tells a usage limit from a short-lived rate limit and gives the reset time. The reset is parsed from local-time text, so it is only as accurate as the agent's clock and zone.
+  - If an agent shows a limit notice and doesn't end the turn within 15 seconds (`ConnectOptions::limit_grace`), the client cancels the turn, then gives up on it.
+  - Claude Code's side status arrives as `SessionEvent::RateLimit`.
+  - The detection is unit-tested with fixtures from the adapters' sources and real reports. No live limit was triggered.
 
 ### Flow engine
 
@@ -170,6 +212,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrowctl` | bin | Command-line client | M1: `status`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, migrations | implemented |
 | `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name and newline-delimited JSON framing (D-013) | implemented |
+| `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; `burrowd` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
 | `burrow-agents` | lib | Agent adapters: ACP, MSP, terminal | planned |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |

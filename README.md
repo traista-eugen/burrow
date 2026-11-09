@@ -46,6 +46,14 @@ cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"
 - **Other pipes:** `--pipe <name>` (or `BURROW_PIPE` for `burrowctl`) runs a separate instance, for example `--pipe burrow-dev`.
 - **Restarts:** if `burrowd` restarts, `events tail` reconnects and carries on from the last event it printed.
 
+Check that an ACP agent starts and what it reports. This runs `initialize` and `session/new`, but no prompt, so it spends no quota:
+
+```powershell
+cargo run -p burrow-acp --example probe -- cursor   # or claude, codex
+```
+
+Claude Code and Codex need their npm adapters installed first; see [architecture.md](docs/architecture.md#acp-agents-as-verified).
+
 ## Documentation
 
 | Document | What's in it |
