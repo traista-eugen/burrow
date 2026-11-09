@@ -1,6 +1,6 @@
 [package]
 name = "burrowd"
-description = "Per-user background service that owns agent sessions"
+description = "Burrow's per-user background service: owns all state and serves clients over a named pipe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,28 @@ publish.workspace = true
 
 [dependencies]
 burrow-protocol.workspace = true
+burrow-store.workspace = true
+burrow-transport.workspace = true
+clap.workspace = true
+serde.workspace = true
+# raw_value: stored event payloads are spliced into notifications without re-parsing.
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
+
+[dev-dependencies]
+burrow-client.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

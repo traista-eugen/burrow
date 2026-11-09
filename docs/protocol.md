@@ -4,7 +4,7 @@
 >
 > **Source of truth (D-004):** the Rust types in `crates/burrow-protocol` define the protocol. This document explains the intent. The JSON Schema generated from those types, [`schema/burrow-protocol.schema.json`](../schema/burrow-protocol.schema.json), is the exact contract. Regenerate it with `cargo xtask schema` whenever the types change; a test fails if it's out of date.
 >
-> **Implemented so far (M1):** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods). The rest of this document is design that has no Rust types yet.
+> **Implemented so far (M1):** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods). `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. The rest of this document is design that has no Rust types yet.
 
 Burrow speaks two protocols of its own:
 
@@ -55,11 +55,16 @@ Either side may send requests. Batches aren't used.
 
 Serialised JSON never contains a raw newline, so one message per line is safe. Large binary content, such as images and video, never travels inside events; it goes through the [artifact store](#artifacts).
 
+On the named pipe:
+- **Who can connect:** only the current Windows user; remote clients are rejected. One `burrowd` serves a pipe. A second one exits with code 3.
+- **Another pipe:** `burrowd --pipe <name>` and `burrowctl --pipe <name>` use another pipe, for example in tests. A bare name means `\\.\pipe\<name>`.
+- **Lines** end in `\n`. A `\r` before it is dropped, and blank lines are skipped. A line longer than 16 MiB, or one that isn't UTF-8, ends the connection: there is no safe way to find the next message (D-013).
+
 ### Naming and value formats
 
 - **Methods** are `area/verb`, for example `session/create` or `run/start`. Notifications follow the same pattern.
 - **Field names** are camelCase.
-- **IDs** are opaque strings: a type prefix plus a time-ordered UUIDv7, for example `ses_…`, `run_…`, `inb_…`, `prj_…`, `dev_…`, `con_…`. Clients must not parse them.
+- **IDs** are opaque strings: a type prefix plus a time-ordered UUIDv7, for example `ses_…`, `run_…`, `inb_…`, `prj_…`, `dev_…`, `con_…`. Clients must not parse them. `burrowd` writes the UUIDv7 in Crockford base32, 26 characters like a ULID: `con_01M6ZK25SVEXQBDYQQT3RN1XEJ`.
 - **Step paths** identify a step inside a run:
   - `plan`: a top-level step;
   - `keyframes[3]`: item 3 of a `foreach`;
@@ -96,6 +101,8 @@ The first request on every connection is `initialize`:
 - If the versions are incompatible, `burrowd` answers with the error `versionMismatch` and lists the versions it supports. The client should then ask the user to update.
 - **Version 0 is unstable.** Both sides must match exactly.
 - **Capabilities** that are left out are off. Unknown capabilities are ignored.
+- **Before `initialize`,** any other request gets the error `invalidState`, and notifications are ignored. A second `initialize` also gets `invalidState`.
+- **After `versionMismatch`,** the connection stays open but uninitialized. The client may try another version, or close it.
 
 ### Errors
 
@@ -130,6 +137,8 @@ Either side can cancel one of its own pending requests by sending the notificati
 
 Domain operations have their own methods, for example `session/cancel` to stop an agent's turn or `run/cancel` to cancel a run.
 
+`burrowd` currently answers each request before it reads the next line, so a `$/cancel` from a client always arrives too late. It is accepted and ignored. The answers on a connection come in request order for now, but clients must still match them by `id`.
+
 ---
 
 ## Part 1: Client protocol
@@ -160,8 +169,11 @@ How subscriptions behave:
 - **`after`:** leave it out to receive only new events. Use `after: 0` for the full history.
 - **Order and gaps:** events arrive in order, at most once per subscription. A client that reconnects subscribes again with the last `seq` it processed, and sees no gaps.
 - **Head:** `head` is the `seq` of the stream's latest event when the subscription starts, or `0` for a stream with no events.
+- **Result first:** the `events/subscribe` result arrives before any event of the subscription.
 - **Missing history:** if the requested range is no longer available (see compaction in the open questions), `burrowd` answers `{"stream": …, "head": N, "reset": true}` and replays nothing. The client then reloads state with `*/get`; live events after `head` still follow. An `after` greater than `head`, for example after the database was replaced, gets the same answer.
-- **Ending:** `events/unsubscribe {stream}` ends a subscription and returns `{}`. All subscriptions end when the connection closes.
+- **One per stream:** a connection has at most one subscription per stream. Subscribing to the same stream again gets `invalidState`; unsubscribe first.
+- **Ending:** `events/unsubscribe {stream}` ends a subscription and returns `{}`, also when the stream wasn't subscribed. No event of the subscription arrives after that answer. All subscriptions end when the connection closes.
+- **Falling behind:** `burrowd` never waits for a slow client. Each connection has an outgoing queue of 256 messages, and each subscription holds up to 1,024 more events. When a subscription overflows, `burrowd` closes the connection. The client reconnects and subscribes again from the last `seq` it processed, and loses nothing (D-015).
 - **Event types are unique across all streams,** so one decoder handles every stream. In Rust that's the `Event` enum.
 
 Streaming agent text is stored too, in chunks of about 100 ms. A client that connects partway through an answer replays it exactly.
@@ -202,6 +214,8 @@ These exist for tests and debugging. `burrowd` accepts them only when started wi
 | Method | Params → Result |
 |---|---|
 | `debug/append` | `{stream, event}` → `{seq}`. Appends `event` to `stream` as if `burrowd` had produced it, and delivers it to subscribers. Any stream name and any event `type` are accepted. M1's integration test uses it. |
+
+An empty stream name or event `type` gets `-32602` (invalid params). `burrowctl debug append <stream> <event-json>` calls it from the command line.
 
 ### Projects
 
@@ -500,6 +514,13 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - Capabilities left out are off.
 - Senders write exactly three fractional digits in times; receivers accept any RFC 3339 instant.
 - New: open enums, event types unique across streams, the [`index` stream events](#index-stream-events), and [`debug/append`](#development-methods).
+
+**2026-11-09, `burrowd` for M1.** Building the server settled these details, now stated in their sections:
+- Who may open the pipe, `--pipe`, and the line rules, including the 16 MiB limit ([framing](#framing)).
+- `burrowd` writes ids in Crockford base32.
+- Before `initialize`, requests get `invalidState`. So does a second `initialize`. `$/cancel` is ignored for now, and answers come in request order.
+- The `events/subscribe` result comes before its events. One subscription per stream and connection. Unsubscribing a stream that isn't subscribed returns `{}`. Slow clients are disconnected and resume (D-015).
+- `debug/append` refuses an empty stream name or event type.
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0 done; M1 in progress. Last updated 2026-11-09.
+> **Status:** M0 and M1 done; M2 is next. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -16,7 +16,7 @@ Every milestone ends with something you can run.
 | # | Milestone | Outcome | Status |
 |---|---|---|---|
 | M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
-| M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ⏳ in progress |
+| M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ✅ done |
 | M2 | Agent sessions | All four agents, driven through one event model | |
 | M3 | Desktop app v1 | Usable every day for chatting with agents | |
 | M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
@@ -34,24 +34,28 @@ Every milestone ends with something you can run.
 - [x] GPUI 0.2.2 window, with Burrow's own Windows manifest (D-010)
 - [x] Architecture, protocol, flow and decision documents (this folder)
 
-## M1: Protocol and service skeleton
+## M1: Protocol and service skeleton ✅
 
 - [x] **`burrow-protocol` types:** the JSON-RPC envelope, `initialize`, errors, `events/subscribe`, and the `index` stream events. Use serde with camelCase field names. Also `$/ping`, `$/cancel`, `events/unsubscribe` and the development-only `debug/append` (D-011).
 - [x] **Schema export:** generate a JSON Schema with `schemars`, written to `schema/burrow-protocol.schema.json` by `cargo xtask schema`. A test fails if the file is out of date.
 - [x] **`burrow-store`:** an SQLite event store (`rusqlite`, WAL mode) that appends and reads streams with gap-free sequence numbers. Database changes go through numbered migrations. Every commit is synced to disk (D-012).
-- [ ] **`burrowd` server:**
-  - named pipe server (`tokio`), restricted to the current user;
+- [x] **`burrowd` server:**
+  - named pipe server (`tokio`), restricted to the current user, one `burrowd` per pipe;
   - one task per connection;
-  - `initialize`, `$/ping` and `events/subscribe` with replay;
+  - `initialize`, `$/ping` and `events/subscribe` with replay, through one store thread (D-014);
+  - slow clients are disconnected and resume (D-015);
   - `debug/append`, accepted only with `--dev`, for the integration test.
-- [ ] **`burrow-client`:** connection handling plus typed calls.
-- [ ] **`burrowctl`:** `status`, and `events tail <stream>`.
-- [ ] **Logging:** `burrowd` logs with `tracing` to `%LOCALAPPDATA%\Burrow\logs`.
+- [x] **`burrow-transport`:** the pipe name and newline-delimited JSON framing, shared by `burrowd` and its clients (D-013).
+- [x] **`burrow-client`:** connection handling plus typed calls, notifications, and subscriptions that resume after a reconnect. It runs on any executor (D-016).
+- [x] **`burrowctl`:** `status`, `events tail <stream>`, and `debug append <stream> <event-json>`.
+- [x] **Logging:** `burrowd` logs with `tracing` to `%LOCALAPPDATA%\Burrow\logs`.
 
 **Done when** an integration test passes:
 1. Start `burrowd`, subscribe to `index`, append events.
 2. Kill and restart `burrowd`.
 3. Resubscribe with the last seen `seq`: every event is received exactly once, in order.
+
+✅ Passes: `events_survive_a_hard_kill_and_resume_exactly_once` in `crates/burrowd/tests/service.rs`. The same file covers replays racing with appends, two subscribers, `debug/append` refused without `--dev`, a second `burrowd` exiting, the handshake rules, disconnecting a client that stops reading, and the client on a non-tokio executor.
 
 ## M2: Agent sessions
 
@@ -79,7 +83,7 @@ Every milestone ends with something you can run.
 
 ## M3: Desktop app v1
 
-- [ ] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running.
+- [ ] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running. The client's I/O runs on `burrow_client::io_runtime()`, since GPUI doesn't run tokio (D-016).
 - [ ] **Decide on `gpui-component`** (now 0.9.0) versus our own widgets. Record the decision in `decisions.md`.
 - [ ] **Layout:** a sidebar with projects, sessions and runs (runs are empty for now), and an inbox panel.
 - [ ] **Session view:**

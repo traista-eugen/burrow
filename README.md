@@ -4,7 +4,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. The workspace builds and opens an empty window. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe and keeps events across restarts, and `burrowctl` talks to it. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -16,9 +16,32 @@ Requirements on Windows:
 ```powershell
 cargo build --workspace
 cargo run -p burrow-app     # desktop app (burrow.exe)
-cargo run -p burrowd        # background service (placeholder for now)
 cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
 ```
+
+Try the service and the command-line client. Start `burrowd` in one terminal; `--dev` enables `debug/append`:
+
+```powershell
+cargo run -p burrowd -- --dev
+```
+
+Then, in a second terminal, follow the `index` stream:
+
+```powershell
+cargo run -p burrowctl -- status
+cargo run -p burrowctl -- events tail index --after 0
+```
+
+And in a third, append an event; the tail prints it:
+
+```powershell
+cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"session","id":"ses_1","title":"Hello"}'
+```
+
+- **Where things live:** `burrowd` keeps its database and logs in `%LOCALAPPDATA%\Burrow`; `--data-dir <dir>` puts them elsewhere.
+- **Logging:** set `BURROW_LOG=debug` for more detail.
+- **Other pipes:** `--pipe <name>` (or `BURROW_PIPE` for `burrowctl`) runs a separate instance, for example `--pipe burrow-dev`.
+- **Restarts:** if `burrowd` restarts, `events tail` reconnects and carries on from the last event it printed.
 
 ## Documentation
 

@@ -19,6 +19,10 @@ Every decision that shapes the architecture gets an entry here.
 | [D-010](#d-010-burrow-ships-its-own-windows-manifest) | Burrow ships its own Windows manifest | 2026-11-05 | accepted |
 | [D-011](#d-011-protocol-types-typed-method-markers-millisecond-timestamps-open-enums) | Protocol types: typed method markers, millisecond timestamps, open enums | 2026-11-09 | accepted |
 | [D-012](#d-012-the-event-store-syncs-every-commit-to-disk) | The event store syncs every commit to disk | 2026-11-09 | accepted |
+| [D-013](#d-013-a-small-crate-holds-the-local-transport) | A small crate holds the local transport | 2026-11-09 | accepted |
+| [D-014](#d-014-one-store-thread-subscribers-register-at-the-head-then-replay) | One store thread; subscribers register at the head, then replay | 2026-11-09 | accepted |
+| [D-015](#d-015-a-client-that-falls-behind-is-disconnected-and-resumes) | A client that falls behind is disconnected, and resumes | 2026-11-09 | accepted |
+| [D-016](#d-016-burrow-client-runs-its-io-on-tokio-behind-a-runtime-agnostic-api) | `burrow-client` runs its I/O on tokio, behind a runtime-agnostic API | 2026-11-09 | accepted |
 
 ---
 
@@ -218,3 +222,90 @@ GPUI's default `windows-manifest` feature is turned off.
 **Consequences.**
 - An append costs at least one fsync. `burrowd` should batch events that arrive together into one append.
 - If append latency ever becomes a problem, batch more first. Weakening durability needs a new decision.
+
+## D-013 A small crate holds the local transport
+
+**Decision.** `burrow-transport` holds what `burrowd` and its local clients must agree on, byte for byte:
+- **The pipe's name:** `\\.\pipe\burrow-<user SID>`, and how a `--pipe` name becomes a full path.
+- **Newline-delimited JSON framing:** one message per line. A line may end in `\r\n`, blank lines are skipped, and a line longer than 16 MiB or not valid UTF-8 ends the connection.
+
+Opening the pipe stays with each side: `burrowd` creates it with its security descriptor, and `burrow-client` connects with retries.
+
+**Why.**
+- Both sides must frame and name things identically, so the code lives in one place.
+- `burrow-protocol` stays pure types, with no I/O and no tokio. The schema export and, later, SDK generation use it too.
+
+**Alternatives considered.**
+- Framing in `burrow-protocol` behind a feature flag: mixes I/O into the types crate.
+- A copy in each crate: the copies would drift.
+
+**Consequences.**
+- WebSocket (M8) frames one message per text frame and won't need the line reader. Its shared pieces can live in this crate too.
+- Only Windows has an implementation. Elsewhere the functions fail with `Unsupported`.
+
+## D-014 One store thread; subscribers register at the head, then replay
+
+**Decision.**
+- **One owner.** A dedicated thread in `burrowd` owns the `Store` (D-012). Appends, reads and subscriber registrations are commands it serves in order.
+- **Subscribing** is three steps:
+  1. The store thread reads the stream's head and registers a live subscriber in one command, so no append can fall in between.
+  2. The connection answers `events/subscribe`.
+  3. A forwarder task replays the events after `after` up to the head, in pages of 256, then forwards live events. It drops any seq it has already sent. It also fills a gap from the store, which can't happen but costs nothing to guard against.
+- **Fan-out.** Right after each commit, the store thread hands the new events to the stream's subscribers, in seq order. Each `events/event` line is encoded once and shared.
+- **Group commit.** Appends to the same stream that are already queued are committed as one transaction of at most 512 events. Each caller gets its own seqs back.
+- **Record mapping.** A record's payload is the complete wire `event` object, `type` included. The type column repeats `type`, so SQL can filter without parsing JSON. `at_ms` becomes the wire `at`. To send an event, `burrowd` splices the stored payload into the notification as raw JSON.
+- **Order of requests.** A connection's requests are handled one at a time, in the order they arrive.
+
+**Why.**
+- With a single writer, appends never wait for a lock.
+- Registering in the thread that appends makes the switch from history to live events exact. A replay can't miss an event that arrives while it runs, and the seq check drops duplicates.
+- Every commit costs an fsync (D-012). Group commit spreads it over all the appends waiting at that moment.
+- Splicing sends exactly what was stored, with no parsing. Fields this build doesn't know, written by a newer `burrowd` on the same database, survive.
+
+**Alternatives considered.**
+- `Arc<Mutex<Store>>` with `spawn_blocking`, plus a tokio `broadcast` channel for live events. A lagging receiver silently loses events, and ordering a commit against its broadcast across threads takes extra care.
+- Storing the event without its `type`, and merging it back in when sending. That needs a parse, or text surgery, for every event sent.
+
+**Consequences.**
+- Replays and appends share one thread. Replays read in pages, so appends interleave. If replays ever slow appends down, a second, read-only connection can serve them, since WAL lets readers run alongside the writer.
+- Later features append through the same thread. That keeps D-005's "every state change goes through the event store" true by construction.
+
+## D-015 A client that falls behind is disconnected, and resumes
+
+**Decision.**
+- Each connection has an outgoing queue of 256 lines. Each subscription buffers up to 1024 live events beyond it.
+- The store thread never waits for a client. When a subscription's buffer is full, the store thread drops the subscriber, and `burrowd` closes the whole connection.
+- The client reconnects and resubscribes from the last seq it processed.
+
+**Why.**
+- One stuck client must not stall the store thread or anyone else, or hold unbounded memory.
+- Resuming is already exact (D-005), so a disconnect loses nothing. Dropping events, or skipping ahead, would break the no-gaps guarantee.
+
+**Alternatives considered.**
+- Unbounded queues: memory grows without limit for a hung client.
+- Blocking the producer: one slow client stalls everyone.
+- A `reset` notification without disconnecting: new protocol surface for what a reconnect already does.
+
+**Consequences.**
+- Clients must treat a dropped connection as normal: reconnect and resubscribe. In `burrow-client`, `Subscription::resume_params` gives the params.
+- The limits are constants in `crates/burrowd/src/connection.rs`. The pipe's own buffers add some slack.
+
+## D-016 `burrow-client` runs its I/O on tokio, behind a runtime-agnostic API
+
+**Decision.**
+- `burrow-client` reads and writes the pipe with two tokio tasks per connection. They run on a runtime the caller passes (`ConnectOptions::runtime`), or on the current one.
+- Everything the caller gets back is executor-agnostic. Call futures await `tokio::sync` channels, which work on any executor, and `Subscription` and `Notifications` implement `futures_core::Stream`.
+- `burrow_client::io_runtime()` builds a one-worker tokio runtime, for callers that don't run tokio themselves, such as the GPUI app.
+
+**Why.**
+- Reading and writing a named pipe at the same time needs overlapped I/O. A synchronous handle serializes them: a blocked read holds up every write. tokio's named pipe support uses overlapped I/O.
+- GPUI has its own executor. Only the I/O needs tokio, and one worker thread is cheap.
+
+**Alternatives considered.**
+- Blocking `std` threads: a blocked read would hold up writes on the same handle.
+- Running the I/O on GPUI's executor: its async I/O doesn't cover named pipes, so it would mean writing our own I/O completion port code.
+- Exposing tokio types in the API: that would force tokio on the app.
+
+**Consequences.**
+- From M3, the app keeps an `io_runtime()` alive for as long as it has connections.
+- A test in `crates/burrowd/tests/service.rs` drives the client from `futures::executor`, so this stays true.
