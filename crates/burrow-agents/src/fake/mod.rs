@@ -9,6 +9,7 @@
 //! to its own executable.
 
 pub mod agent;
+pub mod content;
 pub mod wire;
 
 use std::collections::HashMap;
@@ -267,6 +268,9 @@ async fn read_loop(
                     }),
                 })
             }
+            FromAgent::Call { call } => AgentEvent::ToolCall(call),
+            FromAgent::CallUpdate { update } => AgentEvent::ToolCallUpdate(update),
+            FromAgent::FullPlan { plan } => AgentEvent::Plan(plan),
             FromAgent::Plan { entries } => AgentEvent::Plan(Plan {
                 entries: entries
                     .into_iter()

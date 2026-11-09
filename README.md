@@ -73,6 +73,12 @@ The fake echoes your prompt, streaming it back word by word. Some prompts are sc
 | `/limit` | Hits a simulated usage limit; the session becomes `limited` for an hour |
 | `/slow` | Streams for 10 seconds, so you can try `session cancel` |
 | `/plan` | Shows a plan |
+| `/steps` | Shows a four-step plan and updates it in place as it reads, edits and runs the tests |
+| `/markdown` | Thinks, then answers with headings, lists, a table, a quote and code in five languages |
+| `/diff` | Makes three edits: old and new text as ACP agents send them, a fragment plus a unified diff as Muse sends them, and a new file |
+| `/tools` | Reads and searches a few files, then runs `cargo test` and shows its output |
+| `/long` | Streams a long answer, about 1,800 words, over about six seconds |
+| `/flood [rounds]` | Sends events as fast as it can, about five a round (default 250 rounds), to measure a long transcript |
 
 Answer a permission request from another terminal:
 
@@ -84,7 +90,9 @@ cargo run -p burrowctl -- inbox respond inb_… allow                   # termin
 
 `session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. A session takes its title from the first line of its first prompt; `session rename ses_… "New title"` changes it, and `session list` shows the most recently active sessions first. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents.
 
-`fake-acp` is the same idea speaking real ACP, so it runs through the same adapter as Claude Code, Codex and Cursor. Its scripts are listed in `crates/burrow-agents/src/acp/fake_agent.rs`; `/hang` shows what happens when an agent ignores a cancel.
+`fake-acp` is the same idea speaking real ACP, so it runs through the same adapter as Claude Code, Codex and Cursor. Its scripts are listed in `crates/burrow-agents/src/acp/fake_agent.rs`; `/hang` shows what happens when an agent ignores a cancel. It has `/markdown`, `/diff`, `/tools` and `/long` too, in ACP's shapes.
+
+The content scripts are for trying the desktop app's transcript; run the app with `BURROW_LOG=info,perf=debug` to log what each frame and each batch of events cost.
 
 ### Try a real agent
 

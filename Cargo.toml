@@ -36,6 +36,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-fe
 gpui-component = "=0.9.1"
 # gpui-component's bundled Lucide icons, registered as the app's asset source.
 gpui-kit-assets = "=0.9.1"
+# Line diffs for the transcript's diff cards; the version gpui-component already uses.
+similar = "2.7"
 # Serialization, shared by every crate. Crates enable extra features themselves,
 # e.g. serde_json's raw_value in burrow-store.
 serde = { version = "1.0.229", features = ["derive"] }

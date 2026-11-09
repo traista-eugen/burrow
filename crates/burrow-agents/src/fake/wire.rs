@@ -3,7 +3,10 @@
 //! It is deliberately trivial, so the fake exercises the launcher and the session manager
 //! rather than a protocol. Payload enums reuse Burrow's protocol types.
 
-use burrow_protocol::{PermissionOptionKind, Timestamp, ToolCallStatus, ToolKind, TurnEndReason};
+use burrow_protocol::{
+    PermissionOptionKind, Plan, Timestamp, ToolCall, ToolCallStatus, ToolCallUpdate, ToolKind,
+    TurnEndReason,
+};
 use serde::{Deserialize, Serialize};
 
 /// Adapter → fake agent.
@@ -88,6 +91,22 @@ pub enum FromAgent {
     Plan {
         /// The entries' text, all pending, medium priority.
         entries: Vec<String>,
+    },
+    /// A tool call with everything Burrow's events carry: locations and content. For the
+    /// content scripts.
+    Call {
+        /// The call.
+        call: ToolCall,
+    },
+    /// A change to a tool call, with everything Burrow's events carry.
+    CallUpdate {
+        /// The change.
+        update: ToolCallUpdate,
+    },
+    /// A plan with each entry's status and priority.
+    FullPlan {
+        /// The plan.
+        plan: Plan,
     },
     /// A permission request; answered with [`ToAgent::Permission`].
     Permission {

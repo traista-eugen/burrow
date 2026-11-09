@@ -16,9 +16,13 @@ burrow-protocol.workspace = true
 burrow-transport.workspace = true
 futures.workspace = true
 gpui.workspace = true
-gpui-component.workspace = true
+# `syntect` highlights code blocks in the transcript; its syntaxes load on first use.
+gpui-component = { workspace = true, features = ["syntect"] }
 gpui-kit-assets.workspace = true
 gpui_platform.workspace = true
+jiff.workspace = true
+serde_json.workspace = true
+similar.workspace = true
 # Only for the I/O runtime burrow-client runs on (D-016) and a `watch` channel; the UI runs on
 # GPUI's executor.
 tokio = { workspace = true, features = ["rt", "sync"] }
@@ -35,7 +39,6 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
