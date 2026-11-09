@@ -142,11 +142,11 @@ Each npm adapter is installed into its versioned folder with `npm install --pref
 None of them needs `authenticate` when its CLI is logged in. Burrow offers them no client capabilities (D-021).
 
 **How `burrow-acp` behaves.**
-- **Its own types.** The SDK had five major versions in 2026, so the crate maps ACP into its own types and phase 2 never touches the SDK's.
+- **Its own types.** The SDK had five major versions in 2026, so the crate maps ACP into its own types and the ACP adapter never touches the SDK's.
 - **Lenient parsing.** Requests and `session/update` go through the SDK untyped and are parsed by the crate. An update kind it doesn't know, or one that doesn't parse, becomes `SessionEvent::Other` with the raw JSON. With the SDK's typed handlers, one such update would fail the connection.
 - **One ordered stream.** Session events, permission requests and the end of each turn reach the caller on one ordered stream. The turn's end always comes after its last update.
 - **Answering permission requests.** A permission request waits until the caller answers. It is answered "cancelled" if dropped, and when its turn is cancelled, as ACP requires.
-- **Usage limits.** `burrow_acp::limit` turns all of the above into `AcpError::LimitReached`, with a `LimitInfo { message, resets_at }`. A `SessionEvent::LimitReached` comes just before the turn's end, which phase 2 maps to the `limitReached` session event. The structured markers come first. The text tells a usage limit from a short-lived rate limit and gives the reset time. The reset is parsed from local-time text, so it is only as accurate as the agent's clock and zone.
+- **Usage limits.** `burrow_acp::limit` turns all of the above into `AcpError::LimitReached`, with a `LimitInfo { message, resets_at }`. A `SessionEvent::LimitReached` comes just before the turn's end, which the ACP adapter maps to the `limitReached` session event. The structured markers come first. The text tells a usage limit from a short-lived rate limit and gives the reset time. The reset is parsed from local-time text, so it is only as accurate as the agent's clock and zone.
   - If an agent shows a limit notice and doesn't end the turn within 15 seconds (`ConnectOptions::limit_grace`), the client cancels the turn, then gives up on it.
   - Claude Code's side status arrives as `SessionEvent::RateLimit`.
   - The detection is unit-tested with fixtures from the adapters' sources and real reports. No live limit was triggered.

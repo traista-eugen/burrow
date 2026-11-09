@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0 and M1 done. M2 in progress: the core (protocol, sessions, inbox, Job Objects, the fake agent), the ACP adapter (Claude Code, Codex, Cursor) and the MSP adapter (Muse) are done; the by-hand check of its "done when" from `burrowctl` remains. Last updated 2026-11-09.
+> **Status:** M0, M1 and M2 done; M3 is next. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -17,7 +17,7 @@ Every milestone ends with something you can run.
 |---|---|---|---|
 | M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
 | M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ✅ done |
-| M2 | Agent sessions | All four agents, driven through one event model | in progress |
+| M2 | Agent sessions | All four agents, driven through one event model | ✅ done |
 | M3 | Desktop app v1 | Usable every day for chatting with agents | |
 | M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
 | M5 | Flow engine core | YAML flows run durably, with custom steps | |
@@ -58,7 +58,7 @@ Every milestone ends with something you can run.
 
 ✅ Passes: `events_survive_a_hard_kill_and_resume_exactly_once` in `crates/burrowd/tests/service.rs`. The same file covers replays racing with appends, two subscribers, `debug/append` refused without `--dev`, a second `burrowd` exiting, the handshake rules, disconnecting a client that stops reading, and the client on a non-tokio executor.
 
-## M2: Agent sessions
+## M2: Agent sessions ✅
 
 **Prerequisites** (all installed on the development machine):
 - Node.js v24, which the npm ACP adapters need.
@@ -81,7 +81,7 @@ Every milestone ends with something you can run.
 - [x] **Permission requests become inbox items**, answered through `inbox/respond`; answering twice is `conflict`.
 - [x] **Job Objects** for every agent process, started suspended. Keep Windows awake while sessions are working.
 - [x] **MSP adapter for Muse** (`muse serve`), in `burrow_agents::msp` on the `burrow-msp` client. Its types are written by hand and checked against the committed `muse schema` export (D-022). One `muse serve` per session, mapped onto Burrow's session events, approvals included (D-026). No user-input questions yet, and the sandbox stays on (D-027). Tests use `--provider echo` through `burrowd`, and replay a recorded approval; a live `meta` test passed on 2026-11-09.
-- [ ] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report.
+- [x] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report. No live limit has been seen yet: detection is tested with fixtures and the fake agents, so M7 should confirm it against a real limit.
   - Done in the core: `limitReached` and `AgentEvent::ProviderUsage` in the adapter interface, the `limited` state, prompts refused until `resetsAt`, `usage/get` and its types. Tested with the fake's simulated limit.
   - Done in the ACP adapter: Claude Code's, Codex's and Cursor's limits, detected by `burrow-acp`, become `limitReached` with `resetsAt` when the agent says; Claude Code's rate-limit status feeds `usage/get`. Tested with the fake ACP agent; no live limit was triggered.
   - Muse: done. Its quota failures become `limitReached`, and `usage/read` and `usage/changed` feed `usage/get` (D-026).
@@ -94,7 +94,9 @@ Every milestone ends with something you can run.
 
 ✅ The second passes, with the fake agent's real process tree: `stopping_a_session_leaves_no_stray_processes` in `crates/burrowd/tests/sessions.rs`. The same file covers streaming, the inbox, cancelling, the simulated limit, `$/cancel`, and a hard-killed `burrowd` taking its agents with it. `crates/burrowd/tests/acp.rs` does the same for ACP sessions, with the fake ACP agent.
 
-The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow-client`: `crates/burrowd/tests/acp_live.rs` (run by hand on 2026-11-09) prompts each, streams the answer, approves a permission request with `inbox/respond`, and checks no process is left after `session/stop`. For Muse, `crates/burrowd/tests/muse.rs` covers prompting, streaming, cancelling and a clean stop with `echo`, and its live test approves a shell command from the inbox (D-027 says why that test turns Muse's sandbox off). Still to do: the same by hand from `burrowctl`.
+The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow-client`: `crates/burrowd/tests/acp_live.rs` (run by hand on 2026-11-09) prompts each, streams the answer, approves a permission request with `inbox/respond`, and checks no process is left after `session/stop`. For Muse, `crates/burrowd/tests/muse.rs` covers prompting, streaming, cancelling and a clean stop with `echo`, and its live test approves a shell command from the inbox (D-027 says why that test turns Muse's sandbox off).
+
+✅ The first also passes by hand from `burrowctl` (2026-11-09, against a separate `burrowd`). Each of the four agents answered "Reply with exactly: OK" with a streamed `OK`, asked before running `echo hi > hello.txt`, was approved with `burrowctl inbox respond`, created the file, and left no processes after `session stop`. Muse ran with `BURROW_MUSE_DISABLE_SANDBOX=1`, because its shell sandbox isn't set up on that machine (D-027).
 
 ## M3: Desktop app v1
 
