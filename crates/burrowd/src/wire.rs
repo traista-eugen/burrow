@@ -100,6 +100,7 @@ mod tests {
             title: Some("Fix login".into()),
             project_id: None,
             state: Some("idle".into()),
+            agent: None,
         });
         let record = record(&event);
         assert_eq!(record.event_type, "entityCreated");

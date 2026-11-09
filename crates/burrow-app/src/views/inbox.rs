@@ -1,4 +1,6 @@
-//! The inbox panel: open inbox items, newest first, each with its action buttons.
+//! The inbox panel: open inbox items, newest first, each with its action buttons. The buttons
+//! come with the item's `inboxItemAdded` (D-035); "Loading…" shows only while an older
+//! `burrowd`'s item is fetched.
 
 use burrow_protocol::{InboxActionStyle, InboxItemKind};
 use gpui::prelude::FluentBuilder as _;
@@ -132,24 +134,25 @@ fn card(
     let source_id = entry.source.session_id.clone();
 
     let mut actions = div().flex().flex_wrap().gap_2();
-    match &entry.item {
-        Some(item) => {
-            for action in &item.actions {
-                let item_id = item.id.clone();
+    match &entry.actions {
+        Some(item_actions) => {
+            for action in item_actions {
+                let item_id = entry.id.clone();
                 let action_id = action.id.clone();
                 let state = state.clone();
-                let button =
-                    Button::new(ElementId::Name(format!("{}-{}", item.id, action.id).into()))
-                        .small()
-                        .label(action.label.clone())
-                        .map(|b| match action.style {
-                            Some(InboxActionStyle::Primary) => b.primary(),
-                            Some(InboxActionStyle::Danger) => b.danger(),
-                            None => b.outline(),
-                        })
-                        .on_click(cx.listener(move |_, _, window, cx| {
-                            respond(&state, item_id.clone(), action_id.clone(), window, cx)
-                        }));
+                let button = Button::new(ElementId::Name(
+                    format!("{}-{}", entry.id, action.id).into(),
+                ))
+                .small()
+                .label(action.label.clone())
+                .map(|b| match action.style {
+                    Some(InboxActionStyle::Primary) => b.primary(),
+                    Some(InboxActionStyle::Danger) => b.danger(),
+                    None => b.outline(),
+                })
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    respond(&state, item_id.clone(), action_id.clone(), window, cx)
+                }));
                 actions = actions.child(button);
             }
         }

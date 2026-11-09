@@ -1,17 +1,26 @@
 //! The sidebar: projects with their sessions, sessions without a project, runs (from M5), the
 //! connection status and the inbox button.
+//!
+//! - A session row's context menu (right-click) opens, renames or archives it.
+//! - Archived sessions are hidden; the toggle under the lists shows them, dimmed.
+//! - "5m" times are redrawn when one of them would change, not on a fixed tick (see
+//!   [`super::workspace::Workspace`]'s clock).
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_kit_assets::IconName as Lucide;
 
-use super::relative_time;
 use super::workspace::Workspace;
+use super::{dialogs, relative_time};
 use crate::backend::ConnectionStatus;
+use crate::state::AppState;
 use crate::state::index::{IndexModel, ProjectEntry, SessionEntry};
 use crate::theme;
 
@@ -19,17 +28,22 @@ use crate::theme;
 pub const WIDTH: f32 = 264.;
 
 /// Session ids in the order the sidebar shows them, for stepping through with the keyboard.
-pub fn session_order(index: &IndexModel) -> Vec<String> {
+pub fn session_order(index: &IndexModel, show_archived: bool) -> Vec<String> {
     let mut ids = Vec::new();
     for project in index.projects() {
         ids.extend(
             index
-                .sessions_of(Some(&project.id))
+                .sessions_of(Some(&project.id), show_archived)
                 .iter()
                 .map(|s| s.id.clone()),
         );
     }
-    ids.extend(index.sessions_of(None).iter().map(|s| s.id.clone()));
+    ids.extend(
+        index
+            .sessions_of(None, show_archived)
+            .iter()
+            .map(|s| s.id.clone()),
+    );
     ids
 }
 
@@ -39,22 +53,29 @@ pub fn render(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let theme = cx.theme().clone();
+    let show_archived = workspace.show_archived();
+    let state_entity = workspace.state().clone();
     let state = workspace.state().read(cx);
     let index = state.index();
     let loaded = index.is_loaded();
+    let archived_count = index.archived_count();
     let groups: Vec<(ProjectEntry, Vec<SessionEntry>)> = index
         .projects()
         .iter()
         .map(|project| {
             let sessions = index
-                .sessions_of(Some(&project.id))
+                .sessions_of(Some(&project.id), show_archived)
                 .into_iter()
                 .cloned()
                 .collect();
             (project.clone(), sessions)
         })
         .collect();
-    let loose: Vec<SessionEntry> = index.sessions_of(None).into_iter().cloned().collect();
+    let loose: Vec<SessionEntry> = index
+        .sessions_of(None, show_archived)
+        .into_iter()
+        .cloned()
+        .collect();
     let inbox_count = index.inbox_count();
     let connection = state.connection().clone();
     let selected = workspace.selected_session(cx);
@@ -132,14 +153,42 @@ pub fn render(
                 }),
         );
         for session in sessions {
-            list = list.child(session_row(session, selected.as_deref(), true, cx));
+            list = list.child(session_row(
+                session,
+                selected.as_deref(),
+                true,
+                &state_entity,
+                cx,
+            ));
         }
     }
     if !loose.is_empty() {
         list = list.child(section_header("No project", None, cx));
         for session in &loose {
-            list = list.child(session_row(session, selected.as_deref(), false, cx));
+            list = list.child(session_row(
+                session,
+                selected.as_deref(),
+                false,
+                &state_entity,
+                cx,
+            ));
         }
+    }
+    if archived_count > 0 {
+        list = list.child(
+            div().px_1().pt_1().child(
+                Button::new("toggle-archived")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::Archive))
+                    .label(if show_archived {
+                        "Hide archived".to_owned()
+                    } else {
+                        format!("Show archived ({archived_count})")
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_archived(cx))),
+            ),
+        );
     }
     list = list
         .child(section_header("Runs", None, cx))
@@ -231,6 +280,7 @@ fn session_row(
     session: &SessionEntry,
     selected: Option<&str>,
     indented: bool,
+    state: &Entity<AppState>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let theme = cx.theme().clone();
@@ -239,6 +289,57 @@ fn session_row(
     let dot = theme::state_color(&session.state, cx);
     let label = theme::state_label(&session.state);
     let when = session.activity.map(relative_time).unwrap_or_default();
+    let menu = {
+        let state = state.clone();
+        let workspace = cx.entity().downgrade();
+        let id = session.id.clone();
+        let title = session.display_title();
+        let live = session.state.is_live();
+        let archived = session.archived;
+        move |menu: gpui_component::menu::PopupMenu, _: &mut Window, _: &mut Context<_>| {
+            let open = {
+                let workspace = workspace.clone();
+                let id = id.clone();
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                        workspace.open_session(id.clone(), window, cx)
+                    });
+                }
+            };
+            let rename = {
+                let (state, id, title) = (state.clone(), id.clone(), title.clone());
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                    dialogs::rename_session(state.clone(), id.clone(), title.clone(), window, cx)
+                }
+            };
+            let archive = {
+                let (state, id, title) = (state.clone(), id.clone(), title.clone());
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                    dialogs::confirm_archive(
+                        state.clone(),
+                        id.clone(),
+                        title.clone(),
+                        live,
+                        window,
+                        cx,
+                    )
+                }
+            };
+            menu.item(PopupMenuItem::new("Open").on_click(open))
+                .item(
+                    PopupMenuItem::new("Rename…")
+                        .icon(Icon::new(Lucide::Pencil))
+                        .on_click(rename),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if archived { "Archived" } else { "Archive…" })
+                        .icon(Icon::new(Lucide::Archive))
+                        .disabled(archived)
+                        .on_click(archive),
+                )
+        }
+    };
     div()
         .id(ElementId::Name(format!("session-{}", session.id).into()))
         .h(px(30.))
@@ -254,7 +355,19 @@ fn session_row(
         .when(!is_selected, |row| {
             row.hover(|style| style.bg(theme.sidebar_accent))
         })
-        .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(dot))
+        .when(session.archived, |row| row.opacity(0.55))
+        .map(|row| {
+            if session.archived {
+                row.child(
+                    Icon::new(Lucide::Archive)
+                        .size(px(11.))
+                        .flex_shrink_0()
+                        .text_color(theme.muted_foreground),
+                )
+            } else {
+                row.child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(dot))
+            }
+        })
         .child(
             div()
                 .flex_1()
@@ -284,6 +397,7 @@ fn session_row(
                 }),
         )
         .on_click(cx.listener(move |this, _, window, cx| this.open_session(id.clone(), window, cx)))
+        .context_menu(menu)
 }
 
 fn workspace_pipe(cx: &Context<Workspace>) -> String {

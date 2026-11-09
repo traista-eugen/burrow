@@ -289,11 +289,14 @@ impl Sessions {
             hub.commit(commit).await?;
         }
 
-        // What each agent's latest session offered is what agent/list reports (D-032).
+        // What each agent's latest session offered is what agent/list reports (D-032, D-035).
         for session in sessions.values() {
+            // Ids sort by creation, so later sessions replace earlier ones.
             if !session.models.is_empty() {
-                // Ids sort by creation, so later sessions replace earlier ones.
                 agents.learn_models(&session.agent, session.models.clone());
+            }
+            if !session.agent_modes.is_empty() {
+                agents.learn_agent_modes(&session.agent, session.agent_modes.clone());
             }
         }
 
@@ -435,6 +438,7 @@ impl Sessions {
                     title: session.title.clone(),
                     project_id: session.project_id.clone(),
                     state: Some(SessionState::Starting.to_string()),
+                    agent: Some(session.agent.clone()),
                 },
             )
             .put(SESSION, &session.id, &session);
@@ -460,6 +464,12 @@ impl Sessions {
                 if !started.models.is_empty() {
                     self.agents
                         .learn_models(&session.agent, started.models.clone());
+                }
+                if let Some(modes) = &modes
+                    && !modes.available.is_empty()
+                {
+                    self.agents
+                        .learn_agent_modes(&session.agent, modes.available.clone());
                 }
                 core.agent = Some(started.session);
                 let mut change = core.begin();
@@ -1070,6 +1080,7 @@ impl Core {
                     kind: InboxItemKind::Permission,
                     title,
                     source,
+                    actions: Some(item.actions.clone()),
                 },
             );
         if change.next.state == SessionState::Working {

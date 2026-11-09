@@ -117,6 +117,7 @@ pub async fn detect(agent: &CliAgent) -> AgentInfo {
             detail: None,
         },
         models: Vec::new(),
+        agent_modes: Vec::new(),
         available: false,
         problem: None,
         adapter: None,

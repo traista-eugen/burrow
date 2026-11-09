@@ -419,6 +419,12 @@ async fn detection_runs_the_versioned_binary() {
     );
     assert!(muse.available || muse.login.state == LoginState::LoggedOut);
     assert_eq!(muse.default_agent_mode.as_deref(), Some("promptUnmatched"));
+    // Its approval modes are known before any session, for the new session page (D-035).
+    let modes: Vec<&str> = muse.agent_modes.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        modes,
+        ["promptUnmatched", "onRequest", "allowAll", "denyUnmatched"]
+    );
 }
 
 /// Muse's approval modes are the session's agent modes (D-031): it starts in the one that

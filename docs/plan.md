@@ -107,15 +107,31 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
   - a virtualized transcript;
   - markdown that renders while it streams;
   - tool calls and diffs;
-  - a prompt box.
-- [ ] **Model picker and session state indicators.**
-- [ ] **Startup time and memory checks:** target cold start under 300 ms to the first frame.
+  - [x] a prompt box: grows to six lines, then scrolls; Enter sends, Shift+Enter adds a line; Up in an empty box recalls the session's earlier prompts; disabled with the reason while starting, stopped or failed; a prompt sent during a turn, or before a limit resets, is refused in place with the reason, and the text is kept.
+- [x] **Model picker and session state indicators.** The session header:
+  - model and agent mode pickers from `Session.models` and `agentModes`, shown `name ?? id` and sent by id (D-032), modes with their descriptions;
+  - a state pill (starting, ready, working, needs you, limited, stopped, failed) with what it means and the reason;
+  - the latest turn's and the session's tokens and cost, where the agent reports them;
+  - while `limited`, a banner with the reset time and a live countdown, from the session's `limit` or `usage/get`;
+  - cancel, stop, archive (with a confirmation), rename inline, and open the folder in Explorer.
+- [x] **The new session page and the sidebar:** the agent, a project or just a folder, the model and the agent mode up front; unavailable agents with their `problem`, and **Install** for a missing ACP adapter with its progress and errors; an available agent's note (Muse's sandbox). The sidebar's times redraw when one would change; its context menu opens, renames and archives; archived sessions hide behind a toggle.
+- [x] **Startup time and memory checks** (D-036): `burrow.exe --measure <file>` and `cargo xtask measure`, on the release build with 50 fake sessions in the sidebar, 3 of them with 100 turns. Measured on 2026-11-09 (Ryzen 9 9950X, 64 GB, Radeon AI PRO R9700, Windows 11), median of 5 runs:
+
+  | | `burrowd` running | the app starts `burrowd` |
+  |---|---|---|
+  | First frame, from process creation | 129 ms | 131 ms |
+  | Connected | 141 ms | 201 ms |
+  | Lists and agents loaded | 141 ms | 201 ms |
+  | Working set / private bytes | 62 / 93 MB | 63 / 93 MB |
+
+  With the 3 long sessions open as well (4,206 events): working set 169 MB, private bytes 204 MB, so about 36 MB per open session of about 1,400 events. Run with the transcripts given an empty store, the same three cost 7 MB together: nearly all of it is the current transcript view, which the transcript rebuild should bring down (re-measure with `cargo xtask measure`). The target, under 300 ms to the first frame, is met. `burrow.exe` is 25.1 MB.
 - [x] **The backend for the app** (additive protocol changes; see protocol.md's revision notes):
   - [x] **The sidebar:** sessions take their title from the first prompt, and `session/rename` changes it. `lastActivityAt` on `Session` and `SessionSummary` says when a turn last started or ended, and `session/list` returns the most recently active first. Every state or activity change is on the `index` as `entityStateChanged` with `lastActivityAt`, so the sidebar re-sorts without a `session/get`.
   - [x] **The mode picker:** Muse's approval modes are its agent modes, starting in `promptUnmatched` (D-031), so `session/setAgentMode` works for all four agents' modes. Cursor has modes but keeps its own default (D-024).
   - [x] **The inbox:** a permission request the agent withdraws expires at once, and the session goes back to `working`: ACP's `$/cancel_request`, and approvals Muse settles itself (D-031).
   - [x] **The model picker:** models are named by the ids sessions accept. `agent/list` reports the latest session's models where detection can't tell, and a model's name works in place of its id (D-032).
   - Tested with the fake agents (`/withdraw`, a parameterized `fake-param` model), a recorded Muse transcript, and Muse's echo provider.
+  - [x] **The app's protocol gaps:** a session's `entityCreated` carries its agent and `inboxItemAdded` the item's actions, so the app no longer fetches each new entry; `AgentInfo.agentModes` lists the modes for picking one before the session starts (D-035).
 - [x] **M2's follow-ups:** Muse's approval modes as agent modes; withdrawn permission requests; Cursor's model ids (`agent models` listed ids its sessions refuse); `burrowctl agent list` showing an available agent's `problem`, such as Muse's sandbox note.
 
 **Done when** you prefer Burrow over the agents' own TUIs for everyday chats.

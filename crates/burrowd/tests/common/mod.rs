@@ -176,6 +176,7 @@ pub fn event(n: u64) -> Event {
         title: Some(format!("event {n}")),
         project_id: None,
         state: None,
+        agent: None,
     })
 }
 

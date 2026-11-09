@@ -260,6 +260,7 @@ impl AcpAdapter {
                 detail: Some("scripted; spends no quota".into()),
             },
             models: Vec::new(),
+            agent_modes: Vec::new(),
             available: installed,
             problem: None,
             adapter: None,

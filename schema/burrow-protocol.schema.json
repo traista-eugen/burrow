@@ -83,6 +83,13 @@
           ],
           "description": "The ACP adapter Burrow installs and runs for this agent, when it needs one (Claude Code and Codex). `agent/install` installs it."
         },
+        "agentModes": {
+          "description": "The agent's own modes, what `session/create`'s `agentMode` accepts: known for Muse and the fakes, otherwise the modes of the agent's latest session. Empty when unknown.",
+          "items": {
+            "$ref": "#/$defs/AgentMode"
+          },
+          "type": "array"
+        },
         "available": {
           "description": "Whether `session/create` can start this agent now.",
           "type": "boolean"
@@ -516,6 +523,17 @@
     "EntityCreated": {
       "description": "`entityCreated`: a project, session or run now exists.",
       "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The agent, for sessions, so a list entry needs no `session/get`."
+        },
         "entity": {
           "$ref": "#/$defs/EntityKind",
           "description": "What kind of entity."
@@ -1019,6 +1037,16 @@
     "InboxItemAdded": {
       "description": "`inboxItemAdded`: something now waits on a human. Enough for a list entry or a phone notification; `inbox/get` has the rest.",
       "properties": {
+        "actions": {
+          "description": "The possible answers, as in the item, so a client can show its buttons without `inbox/get`. Absent from older `burrowd`s.",
+          "items": {
+            "$ref": "#/$defs/InboxAction"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "itemId": {
           "description": "The inbox item's id (`inb_…`).",
           "type": "string"

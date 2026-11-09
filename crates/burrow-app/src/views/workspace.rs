@@ -1,19 +1,31 @@
 //! The window's root view: sidebar, main area and inbox panel, and the global actions.
+//!
+//! - **Recent sessions stay open.** The last [`KEEP_OPEN`] sessions shown keep their view, and
+//!   with it their subscription and transcript, so switching back is instant. Older ones are
+//!   dropped, which ends their subscription.
+//! - **The clock.** Relative times ("5m") in the sidebar and the inbox are redrawn when the
+//!   first of them would change ([`super::relative_time_changes_in`]): once a minute while
+//!   something is less than an hour old, else hourly, and not at all when nothing shows a time.
+
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window,
-    div, px,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Task,
+    Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 
 use super::new_session::{NewSessionEvent, NewSessionView};
 use super::session::SessionView;
-use super::{empty, inbox, notify_error, sidebar};
+use super::{empty, inbox, notify_error, now_millis, relative_time_changes_in, sidebar};
 use crate::actions::{
     AddProject, FocusPrompt, NewSession, NextSession, PreviousSession, ToggleInbox,
 };
-use crate::state::AppState;
+use crate::state::{AppState, AppStateEvent};
+
+/// How many recently shown sessions keep their view.
+pub const KEEP_OPEN: usize = 5;
 
 /// What the main area shows.
 pub enum Main {
@@ -30,22 +42,113 @@ pub struct Workspace {
     state: Entity<AppState>,
     focus: FocusHandle,
     main: Main,
+    /// Sessions shown recently, most recent first, at most [`KEEP_OPEN`].
+    recent: Vec<Entity<SessionView>>,
     inbox_open: bool,
+    show_archived: bool,
+    /// When the clock next redraws, if it is set.
+    clock_at: Option<Instant>,
+    _clock: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![cx.observe(&state, |_, _, cx| cx.notify())];
+        let subscriptions = vec![
+            cx.observe(&state, |this, _, cx| {
+                this.schedule_clock(cx);
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &AppStateEvent, window, cx| match event {
+                    AppStateEvent::Archived(id) => this.archived_here(id, window, cx),
+                },
+            ),
+        ];
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
             state,
             focus,
             main: Main::Empty,
+            recent: Vec::new(),
             inbox_open: false,
+            show_archived: false,
+            clock_at: None,
+            _clock: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Whether archived sessions show in the sidebar.
+    pub fn show_archived(&self) -> bool {
+        self.show_archived
+    }
+
+    /// Shows or hides archived sessions.
+    pub fn toggle_archived(&mut self, cx: &mut Context<Self>) {
+        self.show_archived = !self.show_archived;
+        self.schedule_clock(cx);
+        cx.notify();
+    }
+
+    /// The sessions with a view, most recently shown first.
+    pub fn open_sessions(&self) -> &[Entity<SessionView>] {
+        &self.recent
+    }
+
+    /// A session archived from this app leaves the main area, unless archived sessions show.
+    fn archived_here(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_archived {
+            return;
+        }
+        self.recent
+            .retain(|view| view.read(cx).session_id() != session_id);
+        if self.selected_session(cx).as_deref() == Some(session_id) {
+            self.main = Main::Empty;
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Redraws when the first relative time on screen would change.
+    fn schedule_clock(&mut self, cx: &mut Context<Self>) {
+        let now = now_millis();
+        let index = self.state.read(cx).index();
+        let sessions = index
+            .sessions(self.show_archived)
+            .into_iter()
+            .filter_map(|session| session.activity);
+        let inbox = index
+            .inbox()
+            .into_iter()
+            .filter(|_| self.inbox_open)
+            .map(|entry| entry.created);
+        let Some(next) = sessions
+            .chain(inbox)
+            .map(|at| relative_time_changes_in(at, now))
+            .min()
+        else {
+            return;
+        };
+        let at = Instant::now() + next;
+        if self.clock_at.is_some_and(|set| set <= at) {
+            return;
+        }
+        self.clock_at = Some(at);
+        self._clock = Some(cx.spawn(async move |this, cx| {
+            // A little late rather than early, so the label has changed when it is drawn.
+            cx.background_executor()
+                .timer(next + Duration::from_millis(50))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.clock_at = None;
+                this.schedule_clock(cx);
+                cx.notify();
+            });
+        }));
     }
 
     /// The shared state.
@@ -81,8 +184,19 @@ impl Workspace {
         if self.selected_session(cx).as_deref() == Some(session_id.as_str()) {
             return;
         }
-        let state = self.state.clone();
-        let view = cx.new(|cx| SessionView::new(session_id, state, window, cx));
+        let view = match self
+            .recent
+            .iter()
+            .position(|view| view.read(cx).session_id() == session_id)
+        {
+            Some(ix) => self.recent.remove(ix),
+            None => {
+                let state = self.state.clone();
+                cx.new(|cx| SessionView::new(session_id, state, window, cx))
+            }
+        };
+        self.recent.insert(0, view.clone());
+        self.recent.truncate(KEEP_OPEN);
         view.update(cx, |view, cx| view.focus_prompt(window, cx));
         self.main = Main::Session(view);
         cx.notify();
@@ -120,6 +234,7 @@ impl Workspace {
     /// Shows or hides the inbox panel.
     pub fn toggle_inbox(&mut self, cx: &mut Context<Self>) {
         self.inbox_open = !self.inbox_open;
+        self.schedule_clock(cx);
         cx.notify();
     }
 
@@ -155,7 +270,7 @@ impl Workspace {
     }
 
     fn step_session(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let ordered = sidebar::session_order(self.state.read(cx).index());
+        let ordered = sidebar::session_order(self.state.read(cx).index(), self.show_archived);
         if ordered.is_empty() {
             return;
         }

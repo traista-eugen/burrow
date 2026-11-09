@@ -85,6 +85,8 @@ struct Inner {
     config: BackendConfig,
     runtime: tokio::runtime::Runtime,
     client: watch::Sender<Option<Client>>,
+    /// The process id of the `burrowd` this app started last, if it started one.
+    started_daemon: std::sync::Mutex<Option<u32>>,
 }
 
 impl Global for Backend {}
@@ -99,6 +101,7 @@ impl Backend {
                 config,
                 runtime,
                 client,
+                started_daemon: std::sync::Mutex::new(None),
             }),
         })
     }
@@ -111,6 +114,15 @@ impl Backend {
     /// Where it connects.
     pub fn config(&self) -> &BackendConfig {
         &self.inner.config
+    }
+
+    /// The process id of the `burrowd` this app started last, if it started one.
+    pub fn started_daemon(&self) -> Option<u32> {
+        *self
+            .inner
+            .started_daemon
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The pipe's full path, for display.
@@ -245,6 +257,11 @@ pub async fn run_connection<T: 'static>(
                     match daemon::spawn(launch) {
                         Ok(pid) => {
                             info!(pid, program = %launch.program.display(), "started burrowd");
+                            *backend
+                                .inner
+                                .started_daemon
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pid);
                             daemon_started = Some(Instant::now());
                             if !report(ConnectionStatus::StartingDaemon, None, cx) {
                                 return;

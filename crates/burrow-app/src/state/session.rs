@@ -26,6 +26,10 @@ pub struct SessionLog {
     seq: u64,
     /// Usage summed from `usage` events, when there are any.
     event_usage: Option<SessionUsage>,
+    /// The latest turn that reported usage, and its figures summed.
+    turn_usage: Option<(String, SessionUsage)>,
+    /// The latest turn started, from its `userMessage`.
+    latest_turn: Option<String>,
 }
 
 impl SessionLog {
@@ -64,16 +68,29 @@ impl SessionLog {
     pub fn reset(&mut self, head: u64) {
         self.events.clear();
         self.event_usage = None;
+        self.turn_usage = None;
+        self.latest_turn = None;
         self.seq = head;
     }
 
     fn apply(&mut self, event: &StreamEvent) {
+        if let Event::UserMessage(message) = &event.event {
+            self.latest_turn = Some(message.turn_id.clone());
+        }
         if let Event::Usage(usage) = &event.event {
-            let total = self.event_usage.get_or_insert_with(SessionUsage::default);
-            total.input_tokens += usage.input_tokens;
-            total.output_tokens += usage.output_tokens;
-            if let Some(cost) = usage.cost_usd {
-                *total.cost_usd.get_or_insert(0.0) += cost;
+            add_usage(
+                self.event_usage.get_or_insert_with(SessionUsage::default),
+                usage,
+            );
+            if let Some(turn_id) = &usage.turn_id {
+                match &mut self.turn_usage {
+                    Some((id, total)) if id == turn_id => add_usage(total, usage),
+                    _ => {
+                        let mut total = SessionUsage::default();
+                        add_usage(&mut total, usage);
+                        self.turn_usage = Some((turn_id.clone(), total));
+                    }
+                }
             }
         }
         let Some(session) = &mut self.session else {
@@ -111,6 +128,34 @@ impl SessionLog {
         self.session.as_ref()
     }
 
+    /// The latest turn's usage, summed from its `usage` events, with the turn's id. `None`
+    /// until it reports usage, also when an earlier turn did.
+    pub fn turn_usage(&self) -> Option<(&str, &SessionUsage)> {
+        self.turn_usage
+            .as_ref()
+            .filter(|(turn_id, _)| {
+                self.latest_turn
+                    .as_ref()
+                    .is_none_or(|latest| latest == turn_id)
+            })
+            .map(|(turn_id, usage)| (turn_id.as_str(), usage))
+    }
+
+    /// The texts of the prompts sent so far, oldest first: the prompt box's history.
+    pub fn prompts(&self) -> impl Iterator<Item = String> + '_ {
+        self.events.iter().filter_map(|event| match &event.event {
+            Event::UserMessage(message) => {
+                let text: Vec<&str> = message
+                    .content
+                    .iter()
+                    .filter_map(burrow_protocol::ContentBlock::as_text)
+                    .collect();
+                (!text.is_empty()).then(|| text.join("\n"))
+            }
+            _ => None,
+        })
+    }
+
     /// The current state, or `starting` before anything is known.
     pub fn state(&self) -> SessionState {
         self.session
@@ -132,6 +177,14 @@ impl SessionLog {
     /// The seq of the last event, where a resumed subscription carries on.
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+}
+
+fn add_usage(total: &mut SessionUsage, usage: &burrow_protocol::Usage) {
+    total.input_tokens += usage.input_tokens;
+    total.output_tokens += usage.output_tokens;
+    if let Some(cost) = usage.cost_usd {
+        *total.cost_usd.get_or_insert(0.0) += cost;
     }
 }
 
@@ -164,6 +217,8 @@ pub struct SessionStore {
     id: String,
     log: SessionLog,
     status: LoadStatus,
+    /// The stream's head when the subscription started: the history is in once `seq` reaches it.
+    head: Option<u64>,
     _follow: Task<()>,
 }
 
@@ -212,6 +267,7 @@ impl SessionStore {
                     |this: &SessionStore| Some(this.log.seq()),
                     |this, event, cx| match event {
                         FollowEvent::Subscribed { head, reset } => {
+                            this.head = Some(head);
                             if reset {
                                 this.log.reset(head);
                                 cx.emit(SessionStoreEvent::Reset);
@@ -235,8 +291,15 @@ impl SessionStore {
             id,
             log: SessionLog::new(),
             status: LoadStatus::Loading,
+            head: None,
             _follow: follow,
         }
+    }
+
+    /// Whether the session has loaded and its history has replayed up to where the stream was
+    /// when it was opened.
+    pub fn is_caught_up(&self) -> bool {
+        self.status == LoadStatus::Ready && self.head.is_some_and(|head| self.log.seq() >= head)
     }
 
     /// The session's id.
@@ -417,6 +480,52 @@ mod tests {
         assert_eq!(log.seq(), 10);
         assert_eq!(log.push([ev(9, state("idle"))]), 0..0);
         assert_eq!(log.push([ev(11, state("idle"))]), 0..1);
+    }
+
+    #[test]
+    fn the_latest_turn_has_its_own_usage_and_prompts_make_the_history() {
+        let mut log = SessionLog::new();
+        log.set_session(session());
+        let usage = |turn: Option<&str>, input, output, cost| Usage {
+            turn_id: turn.map(Into::into),
+            input_tokens: input,
+            output_tokens: output,
+            cost_usd: cost,
+        };
+        let prompt = |turn: &str, texts: &[&str]| UserMessage {
+            turn_id: turn.into(),
+            content: texts
+                .iter()
+                .map(|text| burrow_protocol::ContentBlock::text(*text))
+                .collect(),
+        };
+        log.push([
+            ev(1, prompt("trn_1", &["first"])),
+            ev(2, usage(Some("trn_1"), 10, 5, Some(0.25))),
+            ev(3, usage(Some("trn_1"), 2, 1, None)),
+        ]);
+        let (turn, figures) = log.turn_usage().unwrap();
+        assert_eq!(turn, "trn_1");
+        assert_eq!((figures.input_tokens, figures.output_tokens), (12, 6));
+        assert_eq!(figures.cost_usd, Some(0.25));
+
+        // A new turn starts its own figures; usage without a turn counts for the session only.
+        log.push([
+            ev(4, prompt("trn_2", &["second", "line"])),
+            ev(5, usage(Some("trn_2"), 1, 1, None)),
+            ev(6, usage(None, 100, 100, None)),
+        ]);
+        let (turn, figures) = log.turn_usage().unwrap();
+        assert_eq!(turn, "trn_2");
+        assert_eq!((figures.input_tokens, figures.output_tokens), (1, 1));
+        assert_eq!(figures.cost_usd, None);
+        let total = log.session().unwrap().usage.as_ref().unwrap();
+        assert_eq!((total.input_tokens, total.output_tokens), (113, 107));
+        assert_eq!(log.prompts().collect::<Vec<_>>(), ["first", "second\nline"]);
+
+        // A newer turn that reports nothing (yet) shows no turn figures, not the last ones.
+        log.push([ev(7, prompt("trn_3", &["third"]))]);
+        assert!(log.turn_usage().is_none());
     }
 
     #[test]

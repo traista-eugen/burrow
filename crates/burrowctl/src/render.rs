@@ -245,6 +245,10 @@ pub fn agent(agent: &AgentInfo) -> String {
     if let Some(mode) = &agent.default_agent_mode {
         line.push_str(&format!("\n        sessions start in mode: {mode}"));
     }
+    if !agent.agent_modes.is_empty() {
+        let modes: Vec<&str> = agent.agent_modes.iter().map(|m| m.id.as_str()).collect();
+        line.push_str(&format!("\n        modes: {}", modes.join(", ")));
+    }
     if !agent.models.is_empty() {
         /// Models listed before the rest are counted; `--json` has them all.
         const SHOWN: usize = 8;
@@ -372,6 +376,7 @@ mod tests {
                 detail: None,
             },
             models: Vec::new(),
+            agent_modes: Vec::new(),
             available,
             problem: problem.map(Into::into),
             adapter: None,
@@ -393,6 +398,18 @@ mod tests {
         let text = agent(&muse(false, Some("Not logged in.")));
         assert!(text.contains("unavailable: Not logged in."), "{text}");
         assert!(!text.contains("problem:"), "said twice: {text}");
+
+        let mut with_modes = muse(true, None);
+        with_modes.agent_modes = ["promptUnmatched", "allowAll"]
+            .into_iter()
+            .map(|id| burrow_protocol::AgentMode {
+                id: id.into(),
+                name: None,
+                description: None,
+            })
+            .collect();
+        let text = agent(&with_modes);
+        assert!(text.contains("modes: promptUnmatched, allowAll"), "{text}");
 
         assert!(!agent(&muse(true, None)).contains("problem:"));
     }
