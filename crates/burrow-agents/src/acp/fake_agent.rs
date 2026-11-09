@@ -19,6 +19,10 @@
 //! | `/slow` | 50 chunks, 100 ms apart; a cancel ends the turn `cancelled` |
 //! | `/hang` | Never ends the turn, and ignores `session/cancel` (like codex-acp#641) |
 //! | `/plan` | A three-step plan |
+//! | `/markdown` | A thought, then headings, lists, a table, a quote and code in five languages |
+//! | `/diff` | Two edits as ACP diffs, old and new text: a change at line 12, and a new file |
+//! | `/tools` | A run of reads and searches, then `cargo test`, its output fenced as Claude Code does |
+//! | `/long` | A long answer, about 1,800 words, streamed over a few seconds |
 //! | `/mode` | Switches itself to mode `plan` |
 //! | `/model` | Switches itself to model `fake-smart` |
 //! | `/rate` | Claude Code's rate-limit status on the side: 90% of the 5-hour window |
@@ -34,6 +38,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+use crate::fake::content;
 
 /// The mode that asks before every change: the one Burrow starts the fake in.
 pub const ASK_MODE: &str = "ask";
@@ -103,6 +109,7 @@ pub fn main() -> ExitCode {
     let mut agent = Agent {
         inbox,
         session: None,
+        cwd: String::new(),
         mode: MODES[0].to_owned(),
         model: MODELS[0].to_owned(),
         next_id: 1,
@@ -170,6 +177,8 @@ enum Interrupt {
 struct Agent {
     inbox: Receiver<Incoming>,
     session: Option<String>,
+    /// The session's folder, from `session/new` or `session/resume`.
+    cwd: String,
     mode: String,
     model: String,
     next_id: u64,
@@ -253,6 +262,7 @@ impl Agent {
                 let session = format!("fake-acp-{}-{}", std::process::id(), self.next_id);
                 self.next_id += 1;
                 self.session = Some(session.clone());
+                self.cwd = text("cwd");
                 self.respond(
                     &id,
                     json!({"sessionId": session, "modes": self.modes(), "configOptions": self.config_options()}),
@@ -260,6 +270,7 @@ impl Agent {
             }
             "session/resume" => {
                 self.session = Some(text("sessionId"));
+                self.cwd = text("cwd");
                 self.respond(
                     &id,
                     json!({"modes": self.modes(), "configOptions": self.config_options()}),
@@ -361,6 +372,13 @@ impl Agent {
                     }
                 }
             }
+            "/markdown" => {
+                self.chunk("agent_thought_chunk", content::THOUGHT);
+                self.stream_by(content::MARKDOWN, 4)
+            }
+            "/long" => self.stream_by(&content::long_answer(), 3),
+            "/diff" => self.diff(),
+            "/tools" => self.tools(),
             "/plan" => {
                 self.update(json!({"sessionUpdate": "plan", "entries": [
                     {"content": "Read the code", "priority": "high", "status": "completed"},
@@ -560,6 +578,107 @@ impl Agent {
             "content": [{"type": "content", "content": {"type": "text", "text": "Nobody answered in time"}}],
         }));
         self.stream("Nobody answered, so I skipped the cleanup.")
+    }
+}
+
+/// The content scripts: realistic markdown, edits and tool output (see [`content`]).
+impl Agent {
+    /// Streams `text` `words` words at a time.
+    fn stream_by(&mut self, text: &str, words: usize) -> Result<(), Interrupt> {
+        let mut piece = String::new();
+        for (ix, word) in text.split_inclusive(' ').enumerate() {
+            piece.push_str(word);
+            if (ix + 1) % words == 0 {
+                self.chunk("agent_message_chunk", &std::mem::take(&mut piece));
+                self.pause(WORD_DELAY)?;
+            }
+        }
+        if !piece.is_empty() {
+            self.chunk("agent_message_chunk", &piece);
+        }
+        Ok(())
+    }
+
+    /// `relative` made absolute against the session's folder, as ACP wants paths.
+    fn path(&self, relative: &str) -> String {
+        std::path::Path::new(&self.cwd)
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
+            .display()
+            .to_string()
+    }
+
+    fn next_call(&mut self) -> String {
+        self.next_id += 1;
+        format!("call_{}", self.next_id)
+    }
+
+    fn diff(&mut self) -> Result<(), Interrupt> {
+        use content::{LIB_EDIT, NEW_FILE};
+        self.stream("I'll make `add` saturate and add `sub`.")?;
+        let call = self.next_call();
+        let lib = self.path(LIB_EDIT.path);
+        self.update(json!({
+            "sessionUpdate": "tool_call", "toolCallId": call, "title": format!("Edit `{}`", LIB_EDIT.path),
+            "kind": "edit", "status": "pending",
+            "locations": [{"path": lib, "line": LIB_EDIT.line}],
+            "content": [{"type": "diff", "path": lib, "oldText": LIB_EDIT.old, "newText": LIB_EDIT.new}],
+        }));
+        self.pause(Duration::from_millis(150))?;
+        self.update(
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed"}),
+        );
+        let call = self.next_call();
+        let notes = self.path(NEW_FILE.0);
+        self.update(json!({
+            "sessionUpdate": "tool_call", "toolCallId": call, "title": format!("Write {}", NEW_FILE.0),
+            "kind": "edit", "status": "completed", "locations": [{"path": notes}],
+            "content": [{"type": "diff", "path": notes, "oldText": null, "newText": NEW_FILE.1}],
+        }));
+        self.stream("Done: `add` saturates, `sub` is new, and NOTES.md says so.")
+    }
+
+    fn tools(&mut self) -> Result<(), Interrupt> {
+        self.chunk(
+            "agent_thought_chunk",
+            "**Exploring the project**\n\nI'll read the README and the library, look for `add`, then run the tests.",
+        );
+        let mut searches = content::SEARCHES.iter();
+        for (title, path, text) in content::READS {
+            let call = self.next_call();
+            self.update(json!({
+                "sessionUpdate": "tool_call", "toolCallId": call, "title": title, "kind": "read",
+                "status": "pending", "locations": [{"path": self.path(path)}],
+            }));
+            self.pause(Duration::from_millis(60))?;
+            self.update(json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": content::fenced(path, text)}}],
+            }));
+            if let Some((title, result)) = searches.next() {
+                let call = self.next_call();
+                self.update(json!({
+                    "sessionUpdate": "tool_call", "toolCallId": call, "title": title,
+                    "kind": "search", "status": "in_progress",
+                }));
+                self.pause(Duration::from_millis(60))?;
+                self.update(json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": result}}],
+                }));
+            }
+        }
+        let call = self.next_call();
+        self.update(json!({
+            "sessionUpdate": "tool_call", "toolCallId": call,
+            "title": format!("`{}`", content::TEST_COMMAND), "kind": "execute", "status": "in_progress",
+        }));
+        self.pause(Duration::from_millis(300))?;
+        let output = format!("```console\n{}```", content::TEST_OUTPUT);
+        self.update(json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": output}}],
+        }));
+        self.stream("All four tests pass. `add` is covered by `tests/add.rs`, but nothing tests overflow yet.")
     }
 }
 

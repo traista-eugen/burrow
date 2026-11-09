@@ -5,12 +5,16 @@
 //!   provider usage from `usage/get`. It also owns the connection loop and the index
 //!   subscription, and has the calls views make (`prompt`, `respond`, `set_model`, …).
 //! - [`session::SessionStore`] (one per open session): the session's events and metadata.
+//! - [`transcript::TranscriptModel`]: a session's events grouped into the transcript's rows; the
+//!   transcript view keeps one per open session.
 //!
-//! The plain models ([`index::IndexModel`], [`session::SessionLog`]) hold the logic and have no
-//! GPUI in them; the entities wire them to `burrowd` and to views.
+//! The plain models ([`index::IndexModel`], [`session::SessionLog`],
+//! [`transcript::TranscriptModel`]) hold the logic and have no GPUI in them; the entities wire
+//! them to `burrowd` and to views.
 
 pub mod index;
 pub mod session;
+pub mod transcript;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

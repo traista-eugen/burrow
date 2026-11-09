@@ -39,6 +39,8 @@ Every decision that shapes the architecture gets an entry here.
 | [D-030](#d-030-the-desktop-app-keeps-plain-models-under-gpui-entities-and-splits-the-session-view-into-header-transcript-and-prompt) | The desktop app keeps plain models under GPUI entities, and splits the session view into header, transcript and prompt | 2026-11-09 | accepted |
 | [D-031](#d-031-muses-approval-modes-are-its-agent-modes-and-an-agent-can-withdraw-a-permission-request) | Muse's approval modes are its agent modes, and an agent can withdraw a permission request | 2026-11-09 | accepted |
 | [D-032](#d-032-models-are-named-by-the-ids-sessions-accept-and-listed-from-the-agents-latest-session) | Models are named by the ids sessions accept, and listed from the agent's latest session | 2026-11-09 | accepted |
+| [D-033](#d-033-the-transcript-is-a-virtualized-list-over-a-plain-model-of-rows-and-markdown-is-parsed-only-where-it-is-shown-and-where-it-grew) | The transcript is a virtualized list over a plain model of rows, and markdown is parsed only where it is shown and where it grew | 2026-11-09 | accepted |
+| [D-034](#d-034-tool-call-diffs-are-drawn-as-unified-diffs-from-either-shape-agents-send-with-line-numbers-only-where-they-are-known) | Tool call diffs are drawn as unified diffs from either shape agents send, with line numbers only where they are known | 2026-11-09 | accepted |
 | [D-035](#d-035-index-events-carry-what-a-list-entry-needs-and-agentinfo-lists-agent-modes) | Index events carry what a list entry needs, and `AgentInfo` lists agent modes | 2026-11-09 | accepted; amends D-029's consequence |
 | [D-036](#d-036-the-app-measures-itself-keeps-recent-sessions-open-and-redraws-only-for-what-changed-on-screen) | The app measures itself, keeps recent sessions open, and redraws only for what changed on screen | 2026-11-09 | accepted |
 
@@ -721,6 +723,84 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - On a fresh install, `agent/list` shows no models for Claude Code, Codex and Cursor until each has run a session. The app's model picker reads `Session.models`, which every session has.
 - A model the agent dropped since its latest session fails `session/create` with `-32602`, naming what the session offers.
 - A name two models share finds neither; use the id.
+
+## D-033 The transcript is a virtualized list over a plain model of rows, and markdown is parsed only where it is shown and where it grew
+
+**Decision.**
+- **Rows.** `state::transcript::TranscriptModel`, a plain model with no GPUI (D-030), groups a session's events into rows and reports each change: a row added, text appended to a row, a row changed in place. Rows are only appended or changed, never inserted or removed, so a row's index is stable.
+  - A turn's consecutive message chunks join into one row, and so do its thought chunks. Anything else in between starts a new row, so the order of events is kept.
+  - A run of two or more consecutive reads and searches becomes one row, "Read 3 files, 2 searches", that opens to their cards. Anything else ends the run.
+  - A turn's `plan` events update one checklist in place, where the turn's first plan appeared. The next turn's first plan starts a new one.
+  - `usage` events are summed per turn and shown on the turn's end line, with the turn's duration from its `userMessage` to its `turnEnded`.
+  - A permission request shows its answer, or why it expired. `permissionResolved` has no reason (D-031), so the model reads it from what follows:
+    - new output in the same turn, or the turn completing: withdrawn by the agent;
+    - the turn ending otherwise: expired, with the turn's message (`the session was stopped`) or reason (cancelled);
+    - no turn running: expired.
+- **The list** is gpui-component's `MessageScroller`, a `gpui::list` that follows its tail. It lays out only the rows on screen (plus 400 px), measuring each as it appears, so rows can be any height and opening a long session lays out only its end. It follows new output while the reader is at the bottom, stops when they scroll up, and then shows "Jump to latest".
+- **Markdown.** Answers and expanded thoughts are gpui-component markdown views.
+  - Each row's `TextViewState` is made the first time the row is shown.
+  - A growing message gets only its new text (`push_str`), which the state parses incrementally in the background. The answer still streaming fades its new words in.
+  - At most 240 states are kept. The ones shown longest ago are dropped, and are made again if their row comes back.
+  - Prompts are plain text.
+- **Code** is highlighted by syntect, through gpui-component's `syntect` feature; its syntaxes load when the first block is highlighted. Every code block shows its language and has a copy button.
+- **Tool cards** open by default only for edits with a diff and for failures. Output is cut after 16 lines and diffs after 24, with a button for the rest. Titles show the parts in backticks as code, and paths relative to the session's folder.
+- **Timings** are logged at `debug` under the `perf` target (`BURROW_LOG=info,perf=debug`): what each batch of events cost the model and the view, and each frame's rows and its layout, prepaint and paint time.
+
+**Why.**
+- **Measured** on 2026-11-09, with a release build on the development machine (Windows 11, a 1602×1039 window at 125%):
+  - **Replay.** A 4,262-event session (`/flood 250`, four times) cost 2.3 ms in all to apply: 0.53 µs per event, 0.39 µs of it in the model. The events arrived in 26 batches.
+  - **Opening it.** The first frame drew 23 rows in 5.6 ms. The next few took 2–3 ms while the markdown states settled.
+  - **Scrolling** all of it with the mouse wheel: 20 rows a frame, 1.2 ms a frame on average, 1.6 ms at p95 and 1.8 ms at worst.
+  - **Streaming** `/slow` (100 chunks, 100 ms apart): 26 µs per chunk, the incremental parse included, and frames of 1.9 ms on average, 2.6 ms at p95. Streaming `/long` (about 1,800 words): 22 µs per chunk, and frames of 1.5 ms, 2.3 ms at p95.
+  - **Memory.** The app's working set was 61 MB before opening the long session and 75 MB after. After scrolling through it twice it was 87 MB; without the cap on markdown states it was 101 MB after once.
+  - **Real sessions.** Opening one of the real four-agent sessions (47 events) took 0.06 ms to apply and 2 ms for the first frame.
+  - The app's first frame came 131 ms after process start.
+- **Lazy markdown states.** Each state is an entity with a parse task and a parsed document. Making one per answer as events arrive would make hundreds while replaying a session nobody scrolls through.
+- **Why a request expired** can be read from the order of events, so it needs no protocol change:
+  - a withdrawal expires the request with `stateChanged(working)`, and the turn carries on with new output;
+  - a cancel expires it the same way, but then the agent only finishes its tool calls and ends the turn `cancelled`;
+  - a stop, an exit or an agent ending the turn expire it in the same commit as `turnEnded`.
+- **One plan per turn, updated in place**, keeps a turn's progress where it started. A row per update would repeat the checklist at every step.
+- **Groups only of consecutive reads and searches:** Codex and Cursor put thoughts between tool calls, and grouping across them would reorder the transcript.
+
+**Alternatives considered.**
+- **gpui-component's `v_virtual_list`:** it needs each row's size up front, and rows here are markdown of any length.
+- **A markdown state per answer, made as events arrive:** see above.
+- **A plan pinned above the prompt box**, as Zed does: that is the prompt's area, which the controls work owns. It could come later, alongside this.
+- **A reason in `permissionResolved`:** a protocol change for something the order of events already says.
+
+**Consequences.**
+- The view keeps view state only: which rows are open, markdown states and cached diffs. Session state stays in `SessionStore` (D-030).
+- If the user cancels a turn after the agent withdrew a request, but before the agent wrote anything new, the request reads "Expired: the turn was cancelled".
+- PowerShell blocks aren't highlighted: syntect's syntax set has no PowerShell.
+- The release `burrow.exe` grew from 21.3 MB (D-028) to 26.1 MB, mostly syntect's syntaxes. They load only when the first code block is highlighted, so startup doesn't pay for them.
+- Rows use gpui-component's own `IconName`, the 106 icons the app bundles, so a missing icon is a compile error rather than a blank square.
+
+## D-034 Tool call diffs are drawn as unified diffs from either shape agents send, with line numbers only where they are known
+
+**Decision.**
+- Tool call cards draw diffs as unified diffs: unchanged lines for context, then removed lines, then added ones, in the theme's danger and success colours. A header gives the path and the counts.
+- **Old and new text**, as ACP's `diff` content carries it and as Muse's edits are made from their arguments (D-026), is diffed line by line with `similar`: three lines of context, and at most 50 ms. `similar` 2.7 was already in the lock through gpui-component; it is now a workspace dependency.
+  - Line numbers are shown only where they are right: for a new file (no old text), numbered from 1, and when the call's location for that path gives a line, which is where the old text starts.
+  - Otherwise lines show only `+` and `-`, and the gap between two hunks shows as `⋯`.
+- **A unified diff in text**, as Muse prints after an edit, is parsed; its hunk headers give the line numbers. When a call has both, only the unified diff is shown.
+- Diffs are computed once per tool call revision and cached. A long one is cut after 24 lines.
+
+**Why.**
+- **What agents send** (seen on 2026-11-09):
+  - Claude Code first sends the edit's fragment (`old_string` and `new_string`) with no line. After the edit it sends the whole file's old and new text, with `line: 1`, so its final diff is numbered correctly.
+  - Muse's `edit_file` gives `{path, find, replace}`, a fragment with no line, and its output holds a unified diff (D-026).
+  - Numbering a fragment from 1 would be wrong, so a fragment isn't numbered.
+- **gpui-component's `Diff`** is a virtualized, focusable view that scrolls by itself. Inside a row of the transcript's list it would need a fixed height and would catch the mouse wheel. A card of a few dozen lines needs none of that.
+
+**Alternatives considered.**
+- **gpui-component's `Diff`:** see above.
+- **Side-by-side diffs:** too wide for the transcript's column.
+- **Syntax highlighting inside diffs:** left for later; the colours of the added and removed lines carry the meaning.
+
+**Consequences.**
+- While Claude Code's edit waits for permission, its card shows the fragment unnumbered. Once the edit is done, the whole file's diff replaces it, numbered.
+- Muse's fragment and its unified diff describe the same change, so the card shows only the unified one.
 
 ## D-035 Index events carry what a list entry needs, and `AgentInfo` lists agent modes
 

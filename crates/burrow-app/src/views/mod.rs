@@ -35,9 +35,10 @@
 //! The transcript and the session controls are replaced separately, so each lives behind a
 //! narrow interface and touches no one else's files:
 //!
-//! - **Transcript** (`session/transcript.rs`, plus any `session/transcript/` submodules):
-//!   `Transcript::new(store, window, cx)`. It reads [`SessionLog::events`] and listens for
-//!   [`SessionStoreEvent`]s. Answering a permission request goes through
+//! - **Transcript** (`session/transcript.rs`, plus its `session/transcript/` submodules):
+//!   `Transcript::new(store, state, window, cx)`. It reads [`SessionLog::events`], listens for
+//!   [`SessionStoreEvent`]s, and groups the events into rows with
+//!   [`crate::state::transcript::TranscriptModel`]. Answering a permission request goes through
 //!   [`AppState::respond`].
 //! - **Header and controls** (`session/header.rs`, plus `session/header/` submodules):
 //!   `SessionHeader::new(store, window, cx)`. It reads [`SessionLog::session`] (state, model,

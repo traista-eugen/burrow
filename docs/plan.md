@@ -103,10 +103,19 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
 - [x] **Connection:** the app connects through `burrow-client`, and starts `burrowd` if it isn't running. The client's I/O runs on `burrow_client::io_runtime()`, since GPUI doesn't run tokio (D-016). Reconnects resume every stream (D-029).
 - [x] **Decide on `gpui-component`:** adopted, 0.9.1 on `gpui-pre` 0.3.12, with GPUI's manifest (D-028).
 - [x] **Layout:** a sidebar with projects, sessions and runs (runs are empty for now), and an inbox panel (D-030).
-- [ ] **Session view** (partial: a basic transcript, permission buttons, a prompt box and a state indicator are in; the items below are next):
-  - a virtualized transcript;
-  - markdown that renders while it streams;
-  - tool calls and diffs;
+- [x] **Session view:**
+  - [x] **A virtualized transcript** (D-033): gpui-component's `MessageScroller` over `state::transcript::TranscriptModel`. It lays out only the rows on screen, follows new output while the reader is at the bottom, and offers "Jump to latest" when they scroll up. A long session opens at its end. An empty session says how to start.
+  - [x] **Markdown that renders while it streams:** each answer's markdown state gets only its new text. Code blocks are highlighted with syntect and have a copy button, and text can be selected and copied. Thoughts collapse to one line.
+  - [x] **Tool calls and diffs** (D-034): cards with the kind's icon, title, file and status, opening to diffs, command output or text. Runs of reads and searches collapse into one row. Diffs are unified, coloured, and numbered where the numbers are known.
+  - [x] **The rest of a session's events:**
+    - plans as a checklist updated in place;
+    - permission requests with their answer, or why they expired (withdrawn by the agent, D-031);
+    - turn ends with their reason, duration and usage;
+    - limits as a banner with the reset time;
+    - errors;
+    - model and mode changes as one-liners.
+  - [x] **Measured** (D-033): replaying 4,262 events costs 0.53 µs per event; scrolling them costs 1.2 ms a frame; a streamed chunk costs about 25 µs.
+  - [x] **Fake agent scripts** for all of it: `/markdown`, `/diff`, `/tools`, `/long`, `/steps` and `/flood`.
   - [x] a prompt box: grows to six lines, then scrolls; Enter sends, Shift+Enter adds a line; Up in an empty box recalls the session's earlier prompts; disabled with the reason while starting, stopped or failed; a prompt sent during a turn, or before a limit resets, is refused in place with the reason, and the text is kept.
 - [x] **Model picker and session state indicators.** The session header:
   - model and agent mode pickers from `Session.models` and `agentModes`, shown `name ?? id` and sent by id (D-032), modes with their descriptions;
