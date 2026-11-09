@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0 and M1 done; M2 is next. Last updated 2026-11-09.
+> **Status:** M0 and M1 done. M2 in progress: the core (protocol, sessions, inbox, Job Objects, the fake agent) is done; the ACP and MSP adapters are being built. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -17,7 +17,7 @@ Every milestone ends with something you can run.
 |---|---|---|---|
 | M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
 | M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ✅ done |
-| M2 | Agent sessions | All four agents, driven through one event model | |
+| M2 | Agent sessions | All four agents, driven through one event model | in progress |
 | M3 | Desktop app v1 | Usable every day for chatting with agents | |
 | M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
 | M5 | Flow engine core | YAML flows run durably, with custom steps | |
@@ -60,27 +60,35 @@ Every milestone ends with something you can run.
 
 ## M2: Agent sessions
 
-**Prerequisites:**
-- Node.js. v24 is already installed.
-- Claude Code CLI, Codex CLI and Cursor CLI (`agent`). None are installed yet.
-- Muse Code. 1.4.9 is already installed.
+**Prerequisites** (all installed):
+- Node.js v24.
+- Claude Code CLI, Codex CLI and Cursor CLI (`agent`).
+- Muse Code.
 
 **Work:**
-- [ ] **Agent detection** (`agent/list`): versions, login state, models.
+- [x] **Agent detection** (`agent/list`, `agent/refresh`): versions, login state, and models where cheap (Cursor's). Read-only commands, run in Job Objects, cached (D-018).
 - [ ] **ACP adapter** using the `agent-client-protocol` crate:
   - [ ] Cursor: `agent acp`
   - [ ] Claude Code: `@agentclientprotocol/claude-agent-acp`
   - [ ] Codex: `@agentclientprotocol/codex-acp`
 - [ ] **MSP adapter for Muse** (`muse serve`). Generate its types from `muse schema`, and test with `--provider echo`.
-- [ ] **Session methods and events:** sessions are stored as `session:<id>` streams.
-- [ ] **Permission requests become inbox items**, answered through `inbox/respond`.
-- [ ] **Job Objects** for every agent process. Keep Windows awake while sessions are working.
+- [x] **The adapter interface** (`burrow-agents`): `AgentAdapter`, `AgentSession`, `AgentEvent`; the ACP and MSP adapters plug into its `acp` and `msp` slots (D-018).
+- [x] **A scripted fake agent** (`burrow-fake-agent`, a real process tree), offered with `burrowd --dev`: echo, permission requests, a simulated limit, slow turns.
+- [x] **Session methods and events:** sessions are stored as `session:<id>` streams, with summaries on `index` and rows committed with them (D-017). Agent text is stored in chunks of about 100 ms. A restart marks live sessions `stopped`.
+- [x] **Projects, kept minimal:** `project/add` (detecting the git `origin`), `list`, `get`, `remove`.
+- [x] **Permission requests become inbox items**, answered through `inbox/respond`; answering twice is `conflict`.
+- [x] **Job Objects** for every agent process, started suspended. Keep Windows awake while sessions are working.
 - [ ] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report.
-- [ ] **`burrowctl session`:** `new`, `prompt`, `watch`, and `inbox respond`.
+  - Done in the core: `limitReached` and `AgentEvent::ProviderUsage` in the adapter interface, the `limited` state, prompts refused until `resetsAt`, `usage/get` and its types. Tested with the fake's simulated limit.
+  - Left for the adapters: detecting each real agent's limits, and Muse's `usage/read`.
+- [x] **Requests on their own tasks, and `$/cancel`** (D-019). **Clients check that the pipe's server runs as the current user.** Both were open from M1.
+- [x] **`burrowctl session`:** `new`, `list`, `prompt` (`--watch`), `watch`, `cancel`, `model`, `stop`, `archive`; `inbox list|respond`; `project add|list`; `agent list`; `usage`. Readable text, or `--json`.
 
 **Done when:**
 - From `burrowctl`, each of the four agents can be prompted, its answer streams back, and a permission request can be approved from the inbox.
 - Stopping a session leaves no stray processes, as checked by an automated test.
+
+✅ The second passes, with the fake agent's real process tree: `stopping_a_session_leaves_no_stray_processes` in `crates/burrowd/tests/sessions.rs`. The same file covers streaming, the inbox, cancelling, the simulated limit, `$/cancel`, and a hard-killed `burrowd` taking its agents with it. The first waits for the ACP and MSP adapters.
 
 ## M3: Desktop app v1
 

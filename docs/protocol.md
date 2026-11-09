@@ -4,7 +4,11 @@
 >
 > **Source of truth (D-004):** the Rust types in `crates/burrow-protocol` define the protocol. This document explains the intent. The JSON Schema generated from those types, [`schema/burrow-protocol.schema.json`](../schema/burrow-protocol.schema.json), is the exact contract. Regenerate it with `cargo xtask schema` whenever the types change; a test fails if it's out of date.
 >
-> **Implemented so far (M1):** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods). `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. The rest of this document is design that has no Rust types yet.
+> **Implemented so far:**
+> - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
+> - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
+>
+> `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
 Burrow speaks two protocols of its own:
 
@@ -57,6 +61,7 @@ Serialised JSON never contains a raw newline, so one message per line is safe. L
 
 On the named pipe:
 - **Who can connect:** only the current Windows user; remote clients are rejected. One `burrowd` serves a pipe. A second one exits with code 3.
+- **Who serves:** before sending anything, a client checks that the process serving the pipe runs as the current user: `GetNamedPipeServerProcessId`, then that process's token, then its user SID. Another account could otherwise create a pipe with `burrowd`'s name first ("pipe squatting") and read what the client sends. If the check fails, or can't be made, the client disconnects without sending a byte. `burrow-client` does this on every connect.
 - **Another pipe:** `burrowd --pipe <name>` and `burrowctl --pipe <name>` use another pipe, for example in tests. A bare name means `\\.\pipe\<name>`.
 - **Lines** end in `\n`. A `\r` before it is dropped, and blank lines are skipped. A line longer than 16 MiB, or one that isn't UTF-8, ends the connection: there is no safe way to find the next message (D-013).
 
@@ -137,7 +142,11 @@ Either side can cancel one of its own pending requests by sending the notificati
 
 Domain operations have their own methods, for example `session/cancel` to stop an agent's turn or `run/cancel` to cancel a run.
 
-`burrowd` currently answers each request before it reads the next line, so a `$/cancel` from a client always arrives too late. It is accepted and ignored. The answers on a connection come in request order for now, but clients must still match them by `id`.
+How `burrowd` runs requests (D-019):
+- **Concurrently.** `initialize`, `events/subscribe` and `events/unsubscribe` are handled in the order they arrive, before the next line is read. Every other request runs on its own, so a slow `session/create` doesn't hold up a `$/ping`. **Answers can come in any order**; match them by `id`.
+- **At most 64 at once** per connection. Beyond that, `burrowd` stops reading the connection until one finishes.
+- **Ids must be unique among pending requests.** A request whose id is still running gets `-32600`.
+- **`$/cancel` is honoured** where giving up is safe. Requests that only read (`*/list`, `*/get`, `agent/list`, `agent/refresh`) and `project/add` answer `cancelled` at once. `session/create` abandons the start: the agent's process tree is killed, the session ends `stopped`, and the answer is `cancelled`. Requests that change state and finish quickly (`session/prompt`, `inbox/respond`, `session/stop`, …) complete, and answer normally. A `$/cancel` for a request that already finished, or never existed, is ignored.
 
 ---
 
@@ -191,6 +200,13 @@ Lists are built from the `index` stream. A client subscribes once and keeps its 
 | `inboxItemAdded` | `itemId, kind, title, source`. Enough for a list entry or a phone notification. |
 | `inboxItemResolved` | `itemId, status (resolved/expired), action?, by?`. `action` and `by` are absent when the item expired. |
 
+What `burrowd` puts on the index, so far:
+- **Projects:** `entityCreated` (with `title`, the project's name) on `project/add`; `entityRemoved` on `project/remove`.
+- **Sessions:** `entityCreated` (with `title` when given, `projectId`, and `state: "starting"`) on `session/create`; `entityStateChanged` on every state change; `entityRenamed` when the first prompt gives the session its title; `entityRemoved` on `session/archive`.
+- **Inbox:** `inboxItemAdded` for each permission request; `inboxItemResolved` when it is answered or expires.
+
+The summary and the change it summarises are committed together (D-017): a client never sees one without the other.
+
 - **`entity`** is `project`, `session` or `run`. It's an open enum: a client ignores events about kinds it doesn't show.
 - **`title`** is the display name: a project's name, or a session's or run's title.
 - **`state`** is a string: one of the [session states](#sessions) or [run states](#flows-and-runs). A client shows a state it doesn't know as it is.
@@ -219,37 +235,70 @@ An empty stream name or event `type` gets `-32602` (invalid params). `burrowctl 
 
 ### Projects
 
-A project is a local git repository Burrow works in, plus its settings.
+A project is a local folder Burrow works in, usually a git repository, plus its settings.
 
 | Method | Params → Result |
 |---|---|
-| `project/list` | → `Project[]` |
-| `project/add` | `{path}` → `Project`. Detects the git remote and the code host. |
+| `project/list` | → `Project[]`, oldest first |
+| `project/add` | `{path}` → `Project`. Detects the git `origin` remote and the code host. |
 | `project/get` | `{projectId}` → `Project` |
-| `project/update` | `{projectId, settings}` → `Project` |
+| `project/update` | `{projectId, settings}` → `Project`. **Not implemented yet:** there are no settings until features need them. |
 | `project/remove` | `{projectId}` → `{}`. Forgets the project; never deletes files. |
 
 ```ts
 type Project = {
-  id: string; name: string; path: string;
-  remote?: { host: "github"; owner: string; repo: string };
-  settings: ProjectSettings;  // role overrides, check command, autoMerge, default flows
+  id: string; name: string; path: string; createdAt: string;
+  remote?: { url: string; host?: "github"; owner?: string; repo?: string };
+  settings: ProjectSettings;  // {} for now; later role overrides, check command, autoMerge, default flows
 }
 ```
+
+Settled in M2:
+- **`path`** must be an absolute path to an existing folder, else `-32602`. It is stored canonicalized, without Windows' `\\?\` prefix. The folder doesn't have to be a git repository: creative flows work in plain folders.
+- **Adding a folder twice** returns the existing project (paths compare case-insensitively).
+- **`name`** is the folder's name.
+- **`remote`** comes from `git remote get-url origin`, when git is installed and the folder has an `origin`. `url` is as git reports it. `host`, `owner` and `repo` are filled in for GitHub URLs (`https://github.com/o/r.git`, `git@github.com:o/r.git`, `ssh://git@github.com/o/r.git`) and absent for other hosts. `host` is an open enum.
+- **`project/remove`** of an unknown id is `notFound`. Sessions keep their `projectId`.
 
 ### Agents, roles and usage
 
 | Method | Params → Result |
 |---|---|
-| `agent/list` | → `AgentInfo[]`: installed agents, with version, integration (`acp`, `msp` or `terminal`), login state and available models |
-| `agent/refresh` | → `AgentInfo[]`. Detects again, for example after you install something. |
-| `usage/get` | → per provider: `used`, `limit`, `resetsAt`, `source` (`reported` by the agent, or `estimated`) |
-| `settings/get`, `settings/update` | Global settings, including the default candidate list for each role |
+| `agent/list` | → `AgentInfo[]`: the agents `burrowd` offers, as last detected |
+| `agent/refresh` | → `AgentInfo[]`. Detects again, for example after you install something or log in. |
+| `usage/get` | → `ProviderUsage[]`: each provider's usage and limit, as last reported |
+| `settings/get`, `settings/update` | Global settings, including the default candidate list for each role. **Not implemented yet.** |
 
 ```ts
-type Candidate  = { agent: "claude" | "codex" | "cursor" | "muse" | string; model?: string; effort?: string };
+type AgentId = "claude" | "codex" | "cursor" | "muse" | "fake" | string;   // open enum
+type AgentInfo = {
+  id: AgentId; name: string;                 // "Claude Code"
+  integration: "acp" | "msp" | "terminal" | "fake" | string;   // open enum
+  installed: boolean; version?: string; path?: string;
+  login: { state: "loggedIn" | "loggedOut" | "unknown" | string; account?: string; detail?: string };
+  models?: { id: string; name?: string }[];  // when cheap to find out
+  available: boolean;                        // session/create can start it now
+  problem?: string;                          // why not, or what looks wrong
+  detectedAt: string;
+};
+type ProviderUsage = {
+  provider: string;            // by default the reporting agent's id
+  agent?: AgentId;
+  used?: number; limit?: number; unit?: string;   // e.g. "tokens", "requests", "usd", "percent"
+  limited?: boolean; resetsAt?: string; message?: string;
+  source: "reported" | "estimated";
+  updatedAt: string;
+};
+type Candidate  = { agent: AgentId; model?: string; effort?: string };
 type RoleConfig = { role: string; candidates: Candidate[]; waitIfResetWithinMinutes: number };
 ```
+
+How detection works (M2):
+- **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota.
+- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout.
+- **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
+- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. Until M2's ACP and MSP adapters land, that includes all four real agents.
+- **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. It is kept in memory only, and is empty again after a restart.
 
 ### Sessions
 
@@ -259,23 +308,67 @@ A session is one conversation with one agent. It is one of two kinds:
 
 | Method | Params → Result |
 |---|---|
-| `session/list` | `{projectId?, state?, limit?, before?}` → `SessionSummary[]` |
-| `session/create` | `{projectId, agent, model?, mode: "structured" \| "terminal", cwd?, title?}` → `Session` |
+| `session/list` | `{projectId?, state?, includeArchived?, limit?, before?}` → `SessionSummary[]`, newest first |
+| `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", cwd?, title?}` → `Session`, once the agent is ready |
 | `session/get` | `{sessionId}` → `Session` |
 | `session/prompt` | `{sessionId, content: ContentBlock[]}` → `{turnId}`. The output arrives as events. |
 | `session/cancel` | `{sessionId}` → `{}`. Stops the current turn; the session stays open. |
 | `session/setModel` | `{sessionId, model}` → `{}` |
-| `session/stop` | `{sessionId}` → `{}`. Ends the agent process. |
-| `session/archive` | `{sessionId}` → `{}` |
+| `session/stop` | `{sessionId}` → `{}`. Ends the agent process and everything it started. |
+| `session/archive` | `{sessionId}` → `{}`. Stops the session if needed and hides it from default lists. |
 
-**Session states:** `starting`, `idle`, `working`, `waiting` (on a human), `limited` (a provider limit was hit), `stopped`, `failed`.
+```ts
+type Session = {
+  id: string; projectId?: string; agent: AgentId; model?: string;
+  mode: "structured" | "terminal"; cwd: string; title?: string;
+  state: SessionState;
+  reason?: string;            // why it stopped or failed
+  turnId?: string;            // the running turn, while working or waiting
+  models?: { id: string; name?: string }[];   // what setModel accepts, when the agent says
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };  // totals
+  limit?: { provider: string; resetsAt?: string; message: string };       // while limited
+  archived?: boolean;
+  createdAt: string; updatedAt: string;
+};
+type SessionSummary = Pick<Session, "id" | "projectId" | "agent" | "model" | "title" | "state"
+                                  | "archived" | "createdAt" | "updatedAt">;
+```
+
+**Session states** (an open enum): `starting`, `idle`, `working`, `waiting` (on a human), `limited` (a provider limit was hit), `stopped`, `failed`.
+
+| From | To | When |
+|---|---|---|
+| `starting` | `idle` | The agent is ready; `session/create` answers. |
+| `starting` | `failed` | The agent couldn't start; `session/create` answers `unavailable`, or the error. |
+| `starting` | `stopped` | `$/cancel` of `session/create`, or `session/stop`, during the start. |
+| `idle`, `limited` | `working` | `session/prompt`. |
+| `working` | `waiting` | A permission request is open. Back to `working` once none is. |
+| `working`, `waiting` | `idle` | `turnEnded`. |
+| `working`, `waiting` | `limited` | `limitReached`. The turn then ends with reason `limit`. |
+| any live state | `stopped` | `session/stop`, `session/archive`, the agent exiting by itself, or `burrowd` stopping. |
+| any live state | `failed` | The agent process exited unexpectedly. `reason` has the last thing it wrote to stderr. |
+
+`stopped` and `failed` are final: the agent process is gone. Resuming a session in a new process is future work.
 
 **`ContentBlock`** follows ACP:
 - `{type: "text", text}`;
 - `{type: "image", artifact: ArtifactRef}`;
 - `{type: "resource", uri}`.
 
-ACP embeds image data directly. Burrow passes artifact references instead, and the adapter converts.
+ACP embeds image data directly. Burrow passes artifact references instead, and the adapter converts. **For now `session/prompt` accepts only text**; image and resource blocks get `-32602`.
+
+Settled in M2:
+- **`session/create`** answers once the agent is ready (`idle`), which can take seconds for an npm-based agent. Clients that want to show progress follow the `index`: the session appears there as `starting` straight away.
+  - `cwd` defaults to the project's folder. Without a `projectId`, `cwd` is required. It must be an existing folder (`-32602`).
+  - `mode: "terminal"` is `unavailable` until M4. An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable` too; a failed start leaves the session `failed`.
+- **`session/prompt`** starts a turn and answers with its id. Only one turn runs at a time: prompting while one runs is `invalidState`, and so is prompting a `stopped` or `failed` session. Prompting a `limited` session whose `resetsAt` is still ahead is `limitReached` (-32005) with `data.resetsAt`; without a known reset time the prompt is tried.
+- **Titles.** A session created without a `title` takes the first line of its first prompt, cut to 60 characters, and announces it with `entityRenamed`.
+- **`session/cancel`** asks the agent to stop the turn, and expires its open permission requests at once. The turn still ends with `turnEnded` (`cancelled`). With no turn running it does nothing.
+- **`session/setModel`** asks the agent to switch; once it agrees, `modelChanged` follows.
+- **`session/stop`** answers once the agent's whole process tree is gone (D-018). A running turn ends with `turnEnded` (`cancelled`), open permission requests expire, and the session is `stopped` with reason `stopped by request`. Stopping a stopped session does nothing.
+- **`session/archive`** stops the session if needed, sets `archived`, and puts `entityRemoved` on the index. `session/list` leaves archived sessions out unless `includeArchived` is set.
+- **Lists** are newest first. `before` takes the last id of the previous page; ids sort by creation. `limit` defaults to 100, at most 1000.
+- **Restarts.** Agent processes run in Job Objects, so they die with `burrowd`. When `burrowd` starts, every session that was live is marked `stopped` (reason: `burrowd stopped, and the agent process ended with it`): a running turn gets `turnEnded` (`error`), open permission requests expire, then `stateChanged`, all before any client can connect. A clean shutdown (Ctrl+C) stops each session the same way, with reason `burrowd shut down`.
 
 #### Session events
 
@@ -286,15 +379,62 @@ Session event types deliberately mirror ACP's `session/update` kinds, so the ACP
 | `userMessage` | `turnId, content` |
 | `agentMessageChunk` | `turnId, text` |
 | `agentThoughtChunk` | `turnId, text` |
-| `toolCall` | `toolCallId, title, kind (read/edit/execute/search/fetch/other), status, locations?` |
-| `toolCallUpdate` | `toolCallId, status?, content?` (text, diff or terminal reference) |
-| `plan` | `entries: {content, status, priority}[]` |
-| `permissionRequested` | `inboxItemId, toolCallId, options` |
-| `turnEnded` | `turnId, reason (completed/cancelled/limit/error)` |
-| `usage` | `inputTokens, outputTokens, costUsd?` |
+| `toolCall` | `turnId?, toolCallId, title, kind, status, locations?, content?, rawInput?` |
+| `toolCallUpdate` | `toolCallId, status?, title?, kind?, locations?, content?`. Absent fields are unchanged; present lists replace the old ones. |
+| `plan` | `entries: {content, status, priority}[]`, replacing the previous plan |
+| `permissionRequested` | `inboxItemId, turnId?, toolCallId, title, options: {optionId, name, kind}[]` |
+| `permissionResolved` | `inboxItemId, toolCallId, status (resolved/expired), optionId?, by?` |
+| `turnEnded` | `turnId, reason (completed/cancelled/limit/error), message?` |
+| `usage` | `turnId?, inputTokens, outputTokens, costUsd?`: one turn's figures |
 | `limitReached` | `provider, resetsAt?, message` |
-| `stateChanged` | `state` |
-| `terminalOpened` | `terminalId` |
+| `stateChanged` | `state, reason?` (why it stopped or failed) |
+| `modelChanged` | `model` |
+| `terminalOpened` | `terminalId` (M4) |
+
+- **Values mirror ACP, in camelCase.** `kind` of a tool call is `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch` or `other`; `status` is `pending`, `inProgress`, `completed` or `failed`; a plan entry's `status` is `pending`, `inProgress` or `completed` and its `priority` `high`, `medium` or `low`; a permission option's `kind` is `allowOnce`, `allowAlways`, `rejectOnce` or `rejectAlways`. All of these, and `turnEnded`'s `reason`, are open enums.
+- **Tool call content** is `{type: "content", content: ContentBlock}`, `{type: "diff", path, oldText?, newText}` or `{type: "terminal", terminalId}`.
+- **Turns.** Every event of a turn comes after its `userMessage` and before its `turnEnded`. Agent text outside a turn is dropped.
+- **Text is stored in chunks of about 100 ms.** `burrowd` buffers a turn's message or thought text and commits it when 100 ms have passed since the first piece, when 16 KiB have built up, or when anything else happens in the session, so the order of events is kept. A client appends consecutive chunks.
+- **`permissionResolved`** says how a `permissionRequested` ended: answered through `inbox/respond`, or expired because the turn was cancelled or ended, the session stopped, or `burrowd` restarted.
+- **`stateChanged`** follows the events that caused it, in the same commit: `userMessage` then `working`, `permissionRequested` then `waiting`, `turnEnded` then `idle`.
+
+A turn with a permission request, as a client sees it:
+
+```jsonc
+// client → burrowd
+{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"ses_01JC…","content":[{"type":"text","text":"Fix the typo in the README"}]}}
+// burrowd → client
+{"jsonrpc":"2.0","id":7,"result":{"turnId":"trn_01JC…"}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":3,"at":"2026-11-06T14:03:22.418Z",
+  "event":{"type":"userMessage","turnId":"trn_01JC…","content":[{"type":"text","text":"Fix the typo in the README"}]}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":4,"at":"2026-11-06T14:03:22.418Z",
+  "event":{"type":"stateChanged","state":"working"}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":5,"at":"2026-11-06T14:03:23.002Z",
+  "event":{"type":"toolCall","turnId":"trn_01JC…","toolCallId":"call_1","title":"Edit README.md","kind":"edit","status":"pending"}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":6,"at":"2026-11-06T14:03:23.004Z",
+  "event":{"type":"permissionRequested","inboxItemId":"inb_01JC…","turnId":"trn_01JC…","toolCallId":"call_1","title":"Edit README.md",
+           "options":[{"optionId":"allow","name":"Allow","kind":"allowOnce"},{"optionId":"reject","name":"Reject","kind":"rejectOnce"}]}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":7,"at":"2026-11-06T14:03:23.004Z",
+  "event":{"type":"stateChanged","state":"waiting"}}}
+// client → burrowd: the answer, from any device
+{"jsonrpc":"2.0","id":8,"method":"inbox/respond","params":{"itemId":"inb_01JC…","action":"allow"}}
+// burrowd → client
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":8,"at":"2026-11-06T14:03:31.540Z",
+  "event":{"type":"permissionResolved","inboxItemId":"inb_01JC…","toolCallId":"call_1","status":"resolved","optionId":"allow","by":"local"}}}
+{"jsonrpc":"2.0","id":8,"result":{"id":"inb_01JC…","kind":"permission","title":"Edit README.md",
+  "source":{"sessionId":"ses_01JC…","toolCallId":"call_1"},
+  "actions":[{"id":"allow","label":"Allow","style":"primary"},{"id":"reject","label":"Reject","style":"danger"}],
+  "status":"resolved","resolution":{"action":"allow","by":"local","at":"2026-11-06T14:03:31.540Z"},
+  "createdAt":"2026-11-06T14:03:23.004Z","closedAt":"2026-11-06T14:03:31.540Z"}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":9,"at":"2026-11-06T14:03:31.540Z",
+  "event":{"type":"stateChanged","state":"working"}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":10,"at":"2026-11-06T14:03:31.902Z",
+  "event":{"type":"toolCallUpdate","toolCallId":"call_1","status":"completed"}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":11,"at":"2026-11-06T14:03:32.210Z",
+  "event":{"type":"agentMessageChunk","turnId":"trn_01JC…","text":"Fixed: \"recieve\" is now \"receive\"."}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":12,"at":"2026-11-06T14:03:32.260Z",
+  "event":{"type":"turnEnded","turnId":"trn_01JC…","reason":"completed"}}}
+```
 
 ### Terminals
 
@@ -361,7 +501,7 @@ Terminal-mode sessions, and terminals that agents start, are emulated inside `bu
 
 | Method | Params → Result |
 |---|---|
-| `inbox/list` | `{status?: "open" \| "resolved", limit?, before?}` → `InboxItem[]` |
+| `inbox/list` | `{status?: "open" \| "resolved" \| "expired", limit?, before?}` → `InboxItem[]`, newest first |
 | `inbox/get` | `{itemId}` → `InboxItem` |
 | `inbox/respond` | `{itemId, action, payload?}` → `InboxItem`. Returns `conflict` if the item was already answered elsewhere. |
 
@@ -371,7 +511,7 @@ type InboxItem = {
   kind: "approval" | "question" | "choice" | "manualTask" | "permission" | "review" | "escalation";
   title: string;
   body?: string;                       // markdown
-  source: { runId?: string; stepPath?: string; sessionId?: string };
+  source: { runId?: string; stepPath?: string; sessionId?: string; toolCallId?: string };
   actions: { id: string; label: string; style?: "primary" | "danger" }[];
   form?: JsonSchema;                   // structured answer, e.g. a feedback text field
   attachments?: ArtifactRef[];         // e.g. plan.md, or 4 candidate images
@@ -379,10 +519,17 @@ type InboxItem = {
   resolution?: { action: string; payload?: unknown; by: string /* deviceId or "local" */; at: string };
   createdAt: string;
   expiresAt?: string;
+  closedAt?: string;                   // when it was resolved or expired
 };
 ```
 
 Inbox changes also appear on the `index` stream as `inboxItemAdded` and `inboxItemResolved`. That's all a phone needs for notifications.
+
+Settled in M2, where the only items are agent permission requests:
+- **A permission request** becomes an item of kind `permission`. Its `title` is the agent's description of the tool call, its `source` names the session and the tool call, and its `actions` are the agent's options: `id` is the `optionId`, `allowOnce` options are `primary` and reject options `danger`.
+- **`inbox/respond`** resolves an open item and passes the answer to the agent; `permissionResolved` and `inboxItemResolved` follow. `action` must be one of the item's action ids (`-32602` otherwise). `by` is `local` for local connections.
+- **Only open items can be answered.** An item that was answered, or expired, gets `conflict`, whichever device got there first.
+- **Items expire** when their turn is cancelled or ends, when their session stops, or when `burrowd` restarts. Nobody answered them; `resolution` stays absent and `closedAt` says when.
 
 ### Artifacts
 
@@ -522,8 +669,20 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - The `events/subscribe` result comes before its events. One subscription per stream and connection. Unsubscribing a stream that isn't subscribed returns `{}`. Slow clients are disconnected and resume (D-015).
 - `debug/append` refuses an empty stream name or event type.
 
+**2026-11-09, M2 core: projects, agents, sessions and the inbox.** Building them settled these details, now stated in their sections:
+- **Requests run concurrently** and answers can come in any order; `$/cancel` is honoured where giving up is safe; at most 64 requests per connection run at once; duplicate pending ids get `-32600` (D-019). This replaces M1's "answers come in request order".
+- **Clients check who serves the pipe** before sending anything.
+- **Projects:** any existing folder, `path` absolute; adding one twice returns the existing project; `remote` gained `url`, and `host`, `owner` and `repo` became optional. `project/update` waits for settings to exist.
+- **Agents:** the `AgentInfo` and `ProviderUsage` shapes; `usage/get` returns an array; `fake` exists with `--dev`.
+- **Sessions:** `projectId` is optional when `cwd` is given; `session/create` answers once the agent is ready; the state transitions; one turn at a time; prompting a `limited` session before its reset is `limitReached`; titles from the first prompt; `session/cancel` and `session/stop` do nothing when there's nothing to stop; archiving stops the session; `includeArchived`; only text prompts so far; what a restart does.
+- **Session events:** `toolCall` gained `turnId?`, `content?` and `rawInput?`; `toolCallUpdate` gained `title?`, `kind?` and `locations?`; `permissionRequested` gained `turnId?` and `title`; `turnEnded` gained `message?`; `usage` gained `turnId?` and is per turn; `stateChanged` gained `reason?`. New: `permissionResolved` and `modelChanged`. The ACP-mirrored values are camelCase open enums. How text is chunked.
+- **Inbox:** `source.toolCallId`, `closedAt`, the `expired` filter; answering anything but an open item is `conflict`; how permission requests map to items.
+- **Index:** what `burrowd` puts there, committed with the change it summarises.
+
 ## Open questions
 
+- **Resuming sessions:** a `stopped` session can't be continued yet. ACP's `session/load` could resume one in a new agent process; how that shows in the stream (a new state, or `starting` again) is open.
+- **Usage history:** `usage/get` is kept in memory only, so a restart forgets reported limits. Flows that wait for a limit to reset (M7) will need it stored.
 - **Terminal size:** with several clients attached at different sizes, which size wins? For now, the last client to resize.
 - **Log compaction:** whether to fold a turn's message chunks into one message once the turn completes. Clients would need to handle `reset`.
 - **Remote media:** whether remote connections need a binary side channel for media instead of base64 chunks.

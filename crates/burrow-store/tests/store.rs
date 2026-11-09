@@ -334,3 +334,113 @@ fn several_stores_can_open_a_new_file_at_once() {
         (1..=OPENERS as u64).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_commit_appends_to_several_streams_and_writes_entities() {
+    use burrow_store::{Append, EntityWrite};
+
+    let mut store = Store::open_in_memory().unwrap();
+    store.append("index", &[event("a", 1)]).unwrap();
+
+    let index = [event("b", 2)];
+    let session = [event("c", 3), event("d", 4)];
+    let more_index = [event("e", 5)];
+    let results = store
+        .commit(
+            &[
+                Append {
+                    stream: "index",
+                    events: &index,
+                },
+                Append {
+                    stream: "session:ses_1",
+                    events: &session,
+                },
+                // The same stream twice in one commit: the second follows the first.
+                Append {
+                    stream: "index",
+                    events: &more_index,
+                },
+            ],
+            &[
+                EntityWrite::put("session", "ses_1", &json!({"state": "starting"})).unwrap(),
+                EntityWrite::put("session", "ses_2", &json!({"state": "idle"})).unwrap(),
+                // A later write to the same entity wins.
+                EntityWrite::put("session", "ses_1", &json!({"state": "idle"})).unwrap(),
+                EntityWrite::put("project", "prj_1", &json!({"name": "burrow"})).unwrap(),
+            ],
+        )
+        .unwrap();
+    let seqs_of: Vec<_> = results.iter().map(|r| r.seqs.clone()).collect();
+    assert_eq!(seqs_of, [2..=2, 1..=2, 3..=3]);
+    assert!(results.iter().all(|r| r.at_ms == results[0].at_ms));
+    assert_eq!(seqs(&store, "index", 0, 10), [1, 2, 3]);
+    assert_eq!(seqs(&store, "session:ses_1", 0, 10), [1, 2]);
+
+    let sessions = store.entities("session").unwrap();
+    let ids: Vec<_> = sessions.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["ses_1", "ses_2"]);
+    let body: serde_json::Value = sessions[0].body().unwrap();
+    assert_eq!(body, json!({"state": "idle"}));
+    assert_eq!(sessions[0].updated_ms, results[0].at_ms);
+    assert_eq!(store.entities("project").unwrap().len(), 1);
+    assert!(store.entities("inbox").unwrap().is_empty());
+
+    // Entity writes alone are allowed; deleting removes the row, twice is fine.
+    store
+        .commit(&[], &[EntityWrite::delete("session", "ses_2")])
+        .unwrap();
+    store
+        .commit(&[], &[EntityWrite::delete("session", "ses_2")])
+        .unwrap();
+    assert!(store.entity("session", "ses_2").unwrap().is_none());
+    let one = store.entity("session", "ses_1").unwrap().unwrap();
+    assert_eq!(one.body.get(), r#"{"state":"idle"}"#);
+}
+
+#[test]
+fn invalid_commits_are_rejected() {
+    use burrow_store::{Append, EntityWrite};
+
+    let mut store = Store::open_in_memory().unwrap();
+    assert!(matches!(store.commit(&[], &[]), Err(Error::EmptyCommit)));
+    let none: [NewEvent; 0] = [];
+    assert!(matches!(
+        store.commit(
+            &[Append {
+                stream: "index",
+                events: &none
+            }],
+            &[]
+        ),
+        Err(Error::EmptyAppend)
+    ));
+    assert!(matches!(
+        store.commit(&[], &[EntityWrite::delete("", "x")]),
+        Err(Error::EmptyEntityKey)
+    ));
+    assert!(matches!(
+        store.commit(&[], &[EntityWrite::put("session", "", &json!({})).unwrap()]),
+        Err(Error::EmptyEntityKey)
+    ));
+}
+
+#[test]
+fn entities_persist_across_reopen() {
+    use burrow_store::EntityWrite;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("burrow.db");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .commit(
+                &[],
+                &[EntityWrite::put("inbox", "inb_1", &json!({"status": "open"})).unwrap()],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let item = store.entity("inbox", "inb_1").unwrap().unwrap();
+    assert_eq!(item.body.get(), r#"{"status":"open"}"#);
+}

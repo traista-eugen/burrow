@@ -38,6 +38,15 @@ pub enum Error {
     /// An event type was empty.
     #[error("event type is empty")]
     EmptyEventType,
+
+    /// [`Store::commit`](crate::Store::commit) was called with no appends and
+    /// no entity writes.
+    #[error("a commit needs at least one append or entity write")]
+    EmptyCommit,
+
+    /// An entity's kind or id was empty.
+    #[error("entity kind or id is empty")]
+    EmptyEntityKey,
 }
 
 /// `Result` with the store's [`Error`].

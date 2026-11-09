@@ -20,9 +20,12 @@ Every decision that shapes the architecture gets an entry here.
 | [D-011](#d-011-protocol-types-typed-method-markers-millisecond-timestamps-open-enums) | Protocol types: typed method markers, millisecond timestamps, open enums | 2026-11-09 | accepted |
 | [D-012](#d-012-the-event-store-syncs-every-commit-to-disk) | The event store syncs every commit to disk | 2026-11-09 | accepted |
 | [D-013](#d-013-a-small-crate-holds-the-local-transport) | A small crate holds the local transport | 2026-11-09 | accepted |
-| [D-014](#d-014-one-store-thread-subscribers-register-at-the-head-then-replay) | One store thread; subscribers register at the head, then replay | 2026-11-09 | accepted |
+| [D-014](#d-014-one-store-thread-subscribers-register-at-the-head-then-replay) | One store thread; subscribers register at the head, then replay | 2026-11-09 | accepted; its "order of requests" superseded by D-019 |
 | [D-015](#d-015-a-client-that-falls-behind-is-disconnected-and-resumes) | A client that falls behind is disconnected, and resumes | 2026-11-09 | accepted |
 | [D-016](#d-016-burrow-client-runs-its-io-on-tokio-behind-a-runtime-agnostic-api) | `burrow-client` runs its I/O on tokio, behind a runtime-agnostic API | 2026-11-09 | accepted |
+| [D-017](#d-017-current-state-lives-in-entity-rows-committed-with-its-events) | Current state lives in entity rows, committed with its events | 2026-11-09 | accepted |
+| [D-018](#d-018-one-adapter-interface-agent-processes-in-job-objects-and-a-fake-agent-that-is-a-real-process) | One adapter interface, agent processes in Job Objects, and a fake agent that is a real process | 2026-11-09 | accepted |
+| [D-019](#d-019-requests-run-concurrently-and-cancel-is-honoured) | Requests run concurrently, and `$/cancel` is honoured | 2026-11-09 | accepted |
 
 ---
 
@@ -309,3 +312,74 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 **Consequences.**
 - From M3, the app keeps an `io_runtime()` alive for as long as it has connections.
 - A test in `crates/burrowd/tests/service.rs` drives the client from `futures::executor`, so this stays true.
+
+## D-017 Current state lives in entity rows, committed with its events
+
+**Decision.**
+- `burrowd` keeps the current state of projects, sessions and inbox items in memory, backed by an `entities` table in the event store's database: one row per entity, holding its protocol type (`Project`, `Session`, `InboxItem`) as JSON.
+- A row is only ever written in the same transaction as the events that describe the change. `Store::commit` appends to several streams and writes rows atomically, so a session's own event, its `index` summary and its row land together or not at all.
+- On startup `burrowd` loads the rows. It doesn't replay streams.
+- Events stay the source of truth for clients (D-005): no row changes without an event, and clients only ever see events and the results of `*/get` and `*/list`.
+
+**Why.**
+- Replaying every stream at startup gets slower as history grows: a session stream holds a text chunk for every 100 ms of every answer.
+- Rebuilding from events would need every field of every entity in some event. The `index` events are summaries on purpose (an inbox item's actions aren't there, for example), so a rebuild would read the session streams too, and be easy to get subtly wrong.
+- Separate appends per stream can't be atomic. A crash between a session's `stateChanged` and its `index` summary would leave the two disagreeing for good. One transaction across streams closes that gap, and group commit (D-014) still batches it.
+
+**Alternatives considered.**
+- **Rebuild everything from events at startup:** see above.
+- **Separate appends, state in memory only:** cheap, but not atomic across streams, and startup would still need a rebuild.
+- **Normalized tables, one column per field:** every new field would need a migration, while the protocol types already define the documents.
+
+**Consequences.**
+- `burrow-store` gained migration 2 (`entities`), `Store::commit`, `Store::entities` and `Store::entity`. The hub's group commit now merges commits across streams.
+- Rows are protocol types, so they follow the protocol's compatibility rules. A row that doesn't decode is skipped with a warning.
+- Lists are served from memory and paged by id. That suits one person's data; SQL queries over the rows remain possible if it ever doesn't.
+
+## D-018 One adapter interface, agent processes in Job Objects, and a fake agent that is a real process
+
+**Decision.**
+- **The interface.** The new crate `burrow-agents` defines `AgentAdapter` (`detect`, `start`) and `AgentSession` (`prompt`, `cancel`, `set_model`, `stop`). A started session also yields a stream of `AgentEvent`s, normalized to Burrow's session events and reusing `burrow-protocol`'s payload types. Turn ids, inbox items and seqs belong to `burrowd`, not to adapters.
+  - `prompt` returns once the agent has the prompt; the turn's end arrives as an event. A permission request carries a reply channel; dropping it means "cancelled".
+  - The rules every adapter follows are written down in `crates/burrow-agents/src/adapter.rs`.
+- **The launcher.** Every agent process is created suspended, put into a new Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, then resumed. It gets `CREATE_NO_WINDOW`; its stderr goes to `tracing`, with the last lines kept for error messages; its stdin and stdout are handed to whoever speaks the agent's protocol. Stopping kills the job and waits until it is empty.
+- **Finding programs.** A bare name is looked up on `PATH` with `PATHEXT`, keeping only `.exe`, `.com`, `.bat` and `.cmd`, so npm's `claude.cmd` wins over `claude.ps1` and the extensionless shell script. Known install folders (`%APPDATA%\npm`, `%LOCALAPPDATA%\cursor-agent`, `%LOCALAPPDATA%\Programs\muse`) are tried after `PATH`. Batch files run through `cmd.exe`, with the standard library's argument quoting.
+- **The fake agent.** `burrow-fake-agent` is a separate binary, built in `burrowd`'s package and run from next to `burrowd.exe`. It speaks a trivial line protocol, follows a script chosen by the prompt (`/permission`, `/limit`, `/slow`, `/plan`, `/pids`, `/crash`, or else an echo), and starts a child process of its own. `burrowd --dev` offers it as agent `fake`.
+- **Slots for phase 2.** The `acp` and `msp` modules hold the adapters that will wrap `burrow-acp` and `burrow-msp`. Until then they detect their agents and refuse to start.
+
+**Why.**
+- One interface keeps the session manager ignorant of ACP and MSP, which are being built in parallel.
+- A turn can last minutes and must stay cancellable while permission requests wait, so `prompt` can't block until the turn ends.
+- Assigning a process to a job after it starts leaves a window in which its children escape the job. Starting it suspended closes that window, using only the standard library's `Command`; the Toolhelp API finds the thread to resume.
+- A fake that runs in-process wouldn't test Job Objects, `.cmd` handling, or "no stray processes". A real process tree does, and it spends no quota.
+- The fake lives in `burrowd`'s package because Cargo builds only a package's own binaries for its integration tests.
+
+**Alternatives considered.**
+- **`PROC_THREAD_ATTRIBUTE_JOB_LIST`** (create the process inside the job): not reachable through `std::process::Command` on stable Rust.
+- **Parsing npm's `.cmd` shims to run `node` directly:** one process fewer, but fragile across npm versions, and the standard library already quotes `cmd.exe` arguments safely.
+- **The `async-trait` crate:** the adapters are used as trait objects, which need boxed futures anyway, and `futures::future::BoxFuture` is already a dependency.
+
+**Consequences.**
+- Every agent is a process tree that dies with its session, and with `burrowd` (D-007). Each console process in it also gets a hidden `conhost.exe`, in the same job.
+- `--dev` needs `burrow-fake-agent.exe` next to `burrowd.exe`; `cargo build` puts it there.
+- Detection runs the agents' CLIs (read-only, no quota) when `burrowd` starts and on `agent/refresh`.
+
+## D-019 Requests run concurrently, and `$/cancel` is honoured
+
+**Decision.**
+- A connection's reader handles `initialize`, `events/subscribe` and `events/unsubscribe` itself, in order, because they change the connection and D-014's subscription guarantees rely on that. Every other request runs on its own task, and answers can come in any order.
+- At most 64 requests per connection run at once; past that, the reader waits. A request whose id is still running gets `-32600`.
+- `$/cancel {id}` sets a flag the request's task can watch. Requests that only read, and detection, give up with `cancelled`. `session/create` abandons the agent's start: its process tree is killed and the session ends `stopped`. Quick state changes finish and answer normally.
+- This replaces D-014's "order of requests" bullet.
+
+**Why.**
+- Since M2 some requests take seconds: `session/create` waits for an agent to start, `agent/refresh` runs CLIs, `session/stop` waits for a process tree to die. One connection, such as the desktop app's, must not stall behind them.
+- Aborting a task at an arbitrary `.await` would leave sessions half-started. Letting each method decide what giving up means keeps state consistent.
+
+**Alternatives considered.**
+- **One connection per slow call:** pushes the problem onto every client.
+- **Aborting the task on `$/cancel`:** unsafe for requests that change state.
+
+**Consequences.**
+- Clients match answers by `id`, as the protocol always required. `burrow-client` gained `Client::start_call`, which returns a `PendingCall` that can send `$/cancel`.
+- A request cancelled after it finished, or one that doesn't support giving up, gets its normal answer.

@@ -174,6 +174,10 @@ fn protocol_md_examples_are_valid_messages() {
         "events/subscribe params",
         "events/subscribe result",
         "events/event params",
+        "session/prompt params",
+        "session/prompt result",
+        "inbox/respond params",
+        "inbox/respond result",
     ] {
         assert!(
             checked.iter().any(|c| c == expected),

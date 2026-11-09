@@ -73,13 +73,13 @@ fn absent_optional_fields_take_defaults() {
 
 #[test]
 fn unknown_event_types_are_kept() {
-    let raw = json!({"type": "agentMessageChunk", "turnId": "trn_1", "text": "Reading the issue…", "n": [1, {"x": null}]});
+    let raw = json!({"type": "stepProgress", "stepPath": "plan", "message": "Reading the issue…", "n": [1, {"x": null}]});
     let event: Event = serde_json::from_value(raw.clone()).unwrap();
     let Event::Unknown(unknown) = &event else {
         panic!("expected an unknown event, got {event:?}");
     };
-    assert_eq!(unknown.type_name(), "agentMessageChunk");
-    assert_eq!(event.type_name(), "agentMessageChunk");
+    assert_eq!(unknown.type_name(), "stepProgress");
+    assert_eq!(event.type_name(), "stepProgress");
     assert!(!event.is_known());
     assert_eq!(Value::Object(unknown.as_object().clone()), raw);
     assert_eq!(serde_json::to_value(&event).unwrap(), raw);
@@ -287,7 +287,25 @@ fn typed_methods_share_one_table() {
             "$/ping",
             "events/subscribe",
             "events/unsubscribe",
-            "debug/append"
+            "debug/append",
+            "project/list",
+            "project/add",
+            "project/get",
+            "project/remove",
+            "agent/list",
+            "agent/refresh",
+            "usage/get",
+            "session/list",
+            "session/create",
+            "session/get",
+            "session/prompt",
+            "session/cancel",
+            "session/setModel",
+            "session/stop",
+            "session/archive",
+            "inbox/list",
+            "inbox/get",
+            "inbox/respond",
         ]
     );
     assert_eq!(names.1, ["$/cancel", "events/event"]);

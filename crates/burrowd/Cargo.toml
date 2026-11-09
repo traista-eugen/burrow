@@ -5,12 +5,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+# `cargo run -p burrowd` runs the service; the package also builds `burrow-fake-agent`.
+default-run = "burrowd"
 
 [dependencies]
+burrow-agents.workspace = true
 burrow-protocol.workspace = true
 burrow-store.workspace = true
 burrow-transport.workspace = true
 clap.workspace = true
+futures.workspace = true
 serde.workspace = true
 # raw_value: stored event payloads are spliced into notifications without re-parsing.
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -26,10 +30,10 @@ windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Power",
 ] }
 
 [dev-dependencies]
 burrow-client.workspace = true
-futures.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

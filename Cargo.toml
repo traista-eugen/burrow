@@ -9,6 +9,7 @@ members = [
     "crates/burrow-client",
     "crates/burrowctl",
     "xtask",
+    "crates/burrow-agents",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ burrow-protocol = { path = "crates/burrow-protocol" }
 burrow-store = { path = "crates/burrow-store" }
 burrow-transport = { path = "crates/burrow-transport" }
 burrow-client = { path = "crates/burrow-client" }
+burrow-agents = { path = "crates/burrow-agents" }
 # Default features minus `windows-manifest`: burrow-app embeds its own manifest
 # (adds long-path + UTF-8 code page), and two manifests fail to link.
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::{Event, StreamName};
 
 /// `debug/append` params: append one event to a stream.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugAppendParams {
     /// The stream to append to. Any name is allowed, including ones `burrowd` doesn't use itself.

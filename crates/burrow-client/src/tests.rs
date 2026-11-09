@@ -396,3 +396,30 @@ async fn an_undecodable_event_ends_its_subscription() {
     let request = server.request().await;
     assert_eq!(request.method, EventsUnsubscribe::NAME);
 }
+
+#[tokio::test]
+async fn a_pending_call_can_be_cancelled() {
+    let (client, mut server) = connect().await;
+    let call = client.start_call::<Ping>(&Empty {}).unwrap();
+    let request = server.request().await;
+    assert_eq!(&request.id, call.id());
+
+    call.cancel().unwrap();
+    let Message::Notification(cancel) = server.message().await else {
+        panic!("expected $/cancel");
+    };
+    let params = cancel
+        .params_as::<burrow_protocol::notifications::Cancel>()
+        .unwrap();
+    assert_eq!(params.id, request.id);
+
+    let error = ErrorObject::new(ErrorKind::Cancelled, "the request was cancelled");
+    server
+        .send(Response::error(Some(request.id), error).to_line())
+        .await;
+    let result = timeout(WAIT, call.result()).await.unwrap();
+    assert_eq!(
+        result.unwrap_err().rpc().unwrap().kind(),
+        Some(ErrorKind::Cancelled)
+    );
+}

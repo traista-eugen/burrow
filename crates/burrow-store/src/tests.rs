@@ -155,3 +155,32 @@ fn schema_rejects_bad_rows() {
         assert!(store.conn.execute(&sql, []).is_err(), "accepted {values}");
     }
 }
+
+#[test]
+fn a_commit_is_all_or_nothing_across_streams_and_entities() {
+    let mut store = Store::open_in_memory().unwrap();
+    install_failing_trigger(&store);
+
+    let first = [event("a", 1)];
+    let second = [event("boom", 2)];
+    let put = EntityWrite::put("session", "ses_1", &json!({"state": "idle"})).unwrap();
+    let err = store
+        .commit(
+            &[
+                Append {
+                    stream: "index",
+                    events: &first,
+                },
+                Append {
+                    stream: "session:ses_1",
+                    events: &second,
+                },
+            ],
+            &[put],
+        )
+        .unwrap_err();
+    assert!(matches!(err, Error::Sqlite(_)), "{err:?}");
+    assert_eq!(store.head("index").unwrap(), 0);
+    assert_eq!(store.head("session:ses_1").unwrap(), 0);
+    assert!(store.entity("session", "ses_1").unwrap().is_none());
+}
