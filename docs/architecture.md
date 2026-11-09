@@ -48,10 +48,31 @@ Burrow is a native desktop app for running AI coding agents. It runs several age
 
 It runs as the logged-in user, not as a Windows Service. That way agents see the user's logins, git credentials, PATH and WSL distros (D-002).
 
+Flags: `--pipe <name>` serves another pipe, `--data-dir <dir>` keeps the database and logs somewhere other than `%LOCALAPPDATA%\Burrow`, and `--dev` enables development-only methods such as `debug/append`.
+
+#### Inside `burrowd`
+
+```
+ named pipe ──▶ listener ──▶ connection task (one per client) ──▶ writer task ──▶ pipe
+                                │                                     ▲ bounded queue (D-015)
+                                │ requests, in order                  │
+                                ▼                                     │
+                          store thread (D-014) ──live events──▶ forwarder task (one per subscription):
+                          owns the SQLite store                 replays history in pages,
+                          appends with group commit             then forwards live events
+```
+
+- **Listener** (`server.rs`): creates every pipe instance with an access list that admits only the current user, and rejects remote clients. It always keeps one instance listening, and makes sure only one `burrowd` serves a pipe.
+- **Connections** (`connection.rs`): one task per client. `initialize` must come first. Requests are answered one at a time, in order. A writer task drains a bounded queue of outgoing lines.
+- **Store thread** (`hub.rs`): the only owner of the event store. It appends, committing appends that queue up together as one transaction, and serves reads. It registers each subscriber at the stream's head, and hands every committed event to the stream's subscribers, never waiting for one.
+- **Forwarders**: one task per subscription. It replays the history from the store, then forwards live events, sending each seq exactly once. A client that falls too far behind is disconnected and resumes (D-015).
+- **Records** (`wire.rs`): a stored payload is the complete wire event, `type` included, and is spliced into `events/event` without being parsed.
+- **Logging** (`logging.rs`): `tracing`, written to daily files in `<data dir>\logs`, and to stderr when run in a console. `BURROW_LOG` sets the filter, for example `debug`; the default is `info`.
+
 ### Clients
 
 - **Desktop app**: `burrow.exe`, built with GPUI. This is the main UI.
-- **`burrowctl`**: a command-line client for scripting and testing. Planned.
+- **`burrowctl`**: a command-line client for scripting and testing: `status`, `events tail <stream>` and `debug append <stream> <event-json>`.
 - **Phone app**: for remote control. The technology isn't decided yet ([plan.md](plan.md#open-decisions)).
 
 Every client speaks the [client protocol](protocol.md#part-1-client-protocol). Clients hold no state that matters: a client can crash or disconnect without affecting sessions or runs.
@@ -109,6 +130,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | What | Where |
 |---|---|
 | Database: event logs, entities, settings | `%LOCALAPPDATA%\Burrow\burrow.db` (SQLite, WAL mode, every commit synced to disk: D-012) |
+| `burrowd` logs | `%LOCALAPPDATA%\Burrow\logs\burrowd.<date>.log` (a new file each day; the last 14 are kept) |
 | Artifacts | `%LOCALAPPDATA%\Burrow\artifacts\<first 2 hex>\<sha256>` |
 | Worktrees for flow runs | `%LOCALAPPDATA%\Burrow\worktrees\<project>\<run>` |
 | Your flow library | `%APPDATA%\Burrow\flows\<flow id>\` |
@@ -117,7 +139,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 ## Windows specifics
 
 - **Startup:** `burrowd` starts at login for the current user and shows a tray icon. The desktop app starts it if it isn't running.
-- **Local connection:** clients connect over the named pipe `\\.\pipe\burrow-<user SID>`. Its access list allows only the current user, and remote pipe clients are rejected.
+- **Local connection:** clients connect over the named pipe `\\.\pipe\burrow-<user SID>`. Its access list allows only the current user, and remote pipe clients are rejected. Only one `burrowd` can serve the pipe; a second one exits with code 3.
 - **Process cleanup:** every agent process and custom step runs inside a Job Object. Stopping a session or step kills its whole process tree, with no orphaned `node`, shell or MCP server processes.
 - **Sleep:** while any session or run is active, `burrowd` asks Windows not to sleep (`SetThreadExecutionState`).
 - **WSL:** a session can run inside a WSL distro (`wsl.exe -d <distro> --`), with path translation between Windows and Linux.
@@ -142,11 +164,12 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | Crate | Kind | Purpose | Status |
 |---|---|---|---|
 | `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types: envelope, errors, `initialize`, event streams, `index` events, `debug/append`; schema export |
-| `burrowd` | bin | The service | placeholder |
+| `burrowd` | bin | The service | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging |
 | `burrow-app` | bin `burrow` | GPUI desktop client | empty window |
-| `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | planned |
-| `burrowctl` | bin | Command-line client | planned |
+| `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | M1: connect, handshake, typed calls, notifications, resumable subscriptions; runs on any executor (D-016) |
+| `burrowctl` | bin | Command-line client | M1: `status`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, migrations | implemented |
+| `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name and newline-delimited JSON framing (D-013) | implemented |
 | `burrow-agents` | lib | Agent adapters: ACP, MSP, terminal | planned |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |

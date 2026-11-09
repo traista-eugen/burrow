@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/burrow-protocol", "crates/burrowd", "crates/burrow-app", "crates/burrow-store", "xtask"]
+members = [
+    "crates/burrow-protocol",
+    "crates/burrowd",
+    "crates/burrow-app",
+    "crates/burrow-store",
+    "crates/burrow-transport",
+    "crates/burrow-client",
+    "crates/burrowctl",
+    "xtask",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +20,8 @@ publish = false
 [workspace.dependencies]
 burrow-protocol = { path = "crates/burrow-protocol" }
 burrow-store = { path = "crates/burrow-store" }
+burrow-transport = { path = "crates/burrow-transport" }
+burrow-client = { path = "crates/burrow-client" }
 # Default features minus `windows-manifest`: burrow-app embeds its own manifest
 # (adds long-path + UTF-8 code page), and two manifests fail to link.
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
@@ -26,6 +37,16 @@ jsonschema = { version = "0.61.0", default-features = false }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 thiserror = "2.0.21"
 tempfile = "3.27.0"
+# Service and clients. Crates enable the tokio features they use.
+tokio = "1.54.1"
+futures = "0.3.34"
+futures-core = "0.3.34"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+uuid = { version = "1.29.2", features = ["v7"] }
+windows-sys = "0.61.2"
 # `cargo xtask icons`: SVG to PNG. Same version GPUI already uses; no text or
 # embedded raster images in our icons, so their features stay off.
 resvg = { version = "0.45.1", default-features = false }
