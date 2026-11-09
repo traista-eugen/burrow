@@ -28,7 +28,7 @@ Documentation is part of the change, not a follow-up. **Update the docs in the s
 
 | When you… | Update |
 |---|---|
-| Add or change a protocol method, event or type | [docs/protocol.md](docs/protocol.md). Once it exists, also regenerate the schema (`cargo xtask schema`). |
+| Add or change a protocol method, event or type | [docs/protocol.md](docs/protocol.md). Also regenerate the schema (`cargo xtask schema`) and commit `schema/burrow-protocol.schema.json`. |
 | Change the flow format or step behaviour | [docs/flows.md](docs/flows.md) and the flow JSON Schema |
 | Make, reverse or replace an architectural decision | Add an entry to [docs/decisions.md](docs/decisions.md). Never rewrite an accepted entry; replace it with a new one. |
 | Finish or rescope milestone work | Tick or edit items in [docs/plan.md](docs/plan.md) |

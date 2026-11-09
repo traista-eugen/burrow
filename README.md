@@ -17,6 +17,7 @@ Requirements on Windows:
 cargo build --workspace
 cargo run -p burrow-app     # desktop app (burrow.exe)
 cargo run -p burrowd        # background service (placeholder for now)
+cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
 ```
 
 ## Documentation

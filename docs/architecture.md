@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status:** draft. Last updated 2026-11-06.
+> **Status:** draft. Last updated 2026-11-09.
 > `D-NNN` references point to entries in [decisions.md](decisions.md).
 
 ## What Burrow is
@@ -138,7 +138,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 | Crate | Kind | Purpose | Status |
 |---|---|---|---|
-| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | placeholder |
+| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types: envelope, errors, `initialize`, event streams, `index` events, `debug/append`; schema export |
 | `burrowd` | bin | The service | placeholder |
 | `burrow-app` | bin `burrow` | GPUI desktop client | empty window |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | planned |
@@ -147,6 +147,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrow-agents` | lib | Agent adapters: ACP, MSP, terminal | planned |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |
+| `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json` | `schema` |
 
 The split of planned crates may change while building. This table must stay current.
 
