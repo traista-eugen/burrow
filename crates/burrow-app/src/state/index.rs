@@ -88,10 +88,10 @@ impl SessionEntry {
 
 /// When a listed session last saw activity.
 ///
-/// `burrowd`'s `SessionSummary.lastActivityAt` (being added in M3) is the right key; until the
-/// protocol has it, `updatedAt` stands in. Switch this one function when it lands.
+/// `burrowd`'s `SessionSummary.lastActivityAt`: when a turn last started or ended. `updatedAt`
+/// stands in only for sessions stored before the field existed.
 fn summary_activity(summary: &SessionSummary) -> Timestamp {
-    summary.updated_at
+    summary.last_activity_at.unwrap_or(summary.updated_at)
 }
 
 /// An open inbox item.
@@ -308,7 +308,9 @@ impl IndexModel {
                     && let Some(session) = self.sessions.get_mut(&changed.id)
                 {
                     session.state = SessionState::from(changed.state.as_str());
-                    session.activity = Some(at);
+                    // `burrowd` sends the session's activity time; the event's own time stands
+                    // in for an older `burrowd`.
+                    session.activity = Some(changed.last_activity_at.unwrap_or(at));
                     applied.changed = true;
                 }
             }
@@ -367,14 +369,14 @@ impl IndexModel {
         let Some(entry) = self.sessions.get_mut(&summary.id) else {
             return false;
         };
+        if entry.activity.is_none() {
+            entry.activity = Some(summary_activity(&summary));
+        }
         entry.agent = Some(summary.agent);
         entry.model = summary.model;
         entry.project_id = summary.project_id;
         if summary.title.is_some() {
             entry.title = summary.title;
-        }
-        if entry.activity.is_none() {
-            entry.activity = Some(summary.updated_at);
         }
         true
     }
@@ -514,6 +516,7 @@ mod tests {
             archived: false,
             created_at: at(0),
             updated_at: at(updated),
+            last_activity_at: Some(at(updated)),
         }
     }
 
@@ -558,6 +561,7 @@ mod tests {
             entity: EntityKind::Session,
             id: id.into(),
             state: state.into(),
+            last_activity_at: None,
         }
     }
 

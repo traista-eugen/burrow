@@ -297,6 +297,7 @@ mod tests {
             archived: false,
             created_at: at(0),
             updated_at: at(0),
+            last_activity_at: None,
         }
     }
 
