@@ -1,0 +1,992 @@
+{
+  "$defs": {
+    "CancelParams": {
+      "description": "`$/cancel` params: which of the sender's own pending requests to cancel. The receiver should stop and answer that request with the error `cancelled`.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "The id of the request to cancel."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ClientCapabilities": {
+      "description": "What the client can do. Every capability defaults to off when absent.",
+      "properties": {
+        "mediaTypes": {
+          "default": [],
+          "description": "Media types the client can display, for example `image/png`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "terminal": {
+          "default": false,
+          "description": "The client can draw terminals (`terminal/attach`).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ClientInfo": {
+      "description": "The client's name, version and kind.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ClientKind",
+          "description": "What sort of client this is."
+        },
+        "name": {
+          "description": "For example `burrow-desktop` or `burrowctl`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The client's own version, for example `0.1.0`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ClientKind": {
+      "description": "What sort of client is connecting.",
+      "oneOf": [
+        {
+          "const": "desktop",
+          "description": "The desktop app, `burrow.exe`.",
+          "type": "string"
+        },
+        {
+          "const": "cli",
+          "description": "`burrowctl` or another command-line tool.",
+          "type": "string"
+        },
+        {
+          "const": "mobile",
+          "description": "The phone app.",
+          "type": "string"
+        },
+        {
+          "const": "step",
+          "description": "A custom step process, in RPC mode (the step protocol).",
+          "type": "string"
+        }
+      ]
+    },
+    "DebugAppendParams": {
+      "description": "`debug/append` params: append one event to a stream.",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/Event",
+          "description": "The event to append. Unknown event types are stored as sent."
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamName",
+          "description": "The stream to append to. Any name is allowed, including ones `burrowd` doesn't use itself."
+        }
+      },
+      "required": [
+        "stream",
+        "event"
+      ],
+      "type": "object"
+    },
+    "DebugAppendResult": {
+      "description": "`debug/append` result.",
+      "properties": {
+        "seq": {
+          "description": "The new event's sequence number in its stream.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq"
+      ],
+      "type": "object"
+    },
+    "Empty": {
+      "description": "An empty object, `{}`: the params of `$/ping` and the result of methods that return nothing. Any members are ignored.",
+      "type": "object"
+    },
+    "EntityCreated": {
+      "description": "`entityCreated`: a project, session or run now exists.",
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/EntityKind",
+          "description": "What kind of entity."
+        },
+        "id": {
+          "description": "The entity's id.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "The project it belongs to, for sessions and runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "Its initial state, for entities that have one (a session or run state).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Its display name: a project's name, or a session's or run's title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "entityCreated"
+        }
+      },
+      "required": [
+        "type",
+        "entity",
+        "id"
+      ],
+      "type": "object"
+    },
+    "EntityKind": {
+      "description": "The kind of entity an `index` event is about.",
+      "oneOf": [
+        {
+          "const": "project",
+          "description": "A project (`prj_…`)."
+        },
+        {
+          "const": "session",
+          "description": "An agent session (`ses_…`)."
+        },
+        {
+          "const": "run",
+          "description": "A flow run (`run_…`)."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "project",
+              "session",
+              "run"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "EntityRemoved": {
+      "description": "`entityRemoved`: the entity left the default lists. A project was removed, or a session or run was archived.",
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/EntityKind",
+          "description": "What kind of entity."
+        },
+        "id": {
+          "description": "The entity's id.",
+          "type": "string"
+        },
+        "type": {
+          "const": "entityRemoved"
+        }
+      },
+      "required": [
+        "type",
+        "entity",
+        "id"
+      ],
+      "type": "object"
+    },
+    "EntityRenamed": {
+      "description": "`entityRenamed`: an entity's display name changed.",
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/EntityKind",
+          "description": "What kind of entity."
+        },
+        "id": {
+          "description": "The entity's id.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The new display name.",
+          "type": "string"
+        },
+        "type": {
+          "const": "entityRenamed"
+        }
+      },
+      "required": [
+        "type",
+        "entity",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "EntityStateChanged": {
+      "description": "`entityStateChanged`: an entity moved to a new state.",
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/EntityKind",
+          "description": "What kind of entity."
+        },
+        "id": {
+          "description": "The entity's id.",
+          "type": "string"
+        },
+        "state": {
+          "description": "The new state: one of the session states or run states in protocol.md. Kept as a string so new states don't break older clients.",
+          "type": "string"
+        },
+        "type": {
+          "const": "entityStateChanged"
+        }
+      },
+      "required": [
+        "type",
+        "entity",
+        "id",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ErrorData": {
+      "description": "`error.data`: the error kind plus details that only some kinds carry.",
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What went wrong. Absent on standard JSON-RPC errors."
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`limitReached`: when the limit resets, if known."
+        },
+        "supported": {
+          "description": "`versionMismatch`: the protocol versions the server supports.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ErrorKind": {
+      "description": "Why a Burrow request failed. Sent in `error.data.kind`; clients branch on this.",
+      "oneOf": [
+        {
+          "const": "notFound",
+          "description": "The entity doesn't exist, or this device can't see it."
+        },
+        {
+          "const": "invalidState",
+          "description": "Not allowed in the entity's current state, for example prompting a stopped session."
+        },
+        {
+          "const": "conflict",
+          "description": "Someone else got there first, for example the inbox item was already answered."
+        },
+        {
+          "const": "unauthorized",
+          "description": "Not authenticated, or the device lacks the permission."
+        },
+        {
+          "const": "limitReached",
+          "description": "A provider limit was hit. `data.resetsAt` gives the reset time when known."
+        },
+        {
+          "const": "versionMismatch",
+          "description": "Incompatible protocol versions. `data.supported` lists the supported ones."
+        },
+        {
+          "const": "cancelled",
+          "description": "The request was cancelled."
+        },
+        {
+          "const": "unavailable",
+          "description": "Something needed is missing, for example the agent isn't installed."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "notFound",
+              "invalidState",
+              "conflict",
+              "unauthorized",
+              "limitReached",
+              "versionMismatch",
+              "cancelled",
+              "unavailable"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "ErrorObject": {
+      "description": "The `error` member of a failed response.",
+      "properties": {
+        "code": {
+          "description": "A JSON-RPC error code: a standard one, or one of Burrow's, `-32001` to `-32008`.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorData"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Burrow's structured details. Always present on Burrow's own errors; may be absent on standard JSON-RPC errors."
+        },
+        "message": {
+          "description": "A human-readable description. Clients show it but never branch on it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Event": {
+      "description": "One event in a stream, tagged by `type`.\n\nEvent `type` names are unique across all streams. A receiver must accept a `type` it doesn't know, show it as an unsupported event and keep going. In Rust it decodes as `Event::Unknown`, which keeps the raw JSON.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EntityCreated"
+        },
+        {
+          "$ref": "#/$defs/EntityRenamed"
+        },
+        {
+          "$ref": "#/$defs/EntityStateChanged"
+        },
+        {
+          "$ref": "#/$defs/EntityRemoved"
+        },
+        {
+          "$ref": "#/$defs/InboxItemAdded"
+        },
+        {
+          "$ref": "#/$defs/InboxItemResolved"
+        },
+        {
+          "$ref": "#/$defs/UnknownEvent"
+        }
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "InboxItemAdded": {
+      "description": "`inboxItemAdded`: something now waits on a human. Enough for a list entry or a phone notification; `inbox/get` has the rest.",
+      "properties": {
+        "itemId": {
+          "description": "The inbox item's id (`inb_…`).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/InboxItemKind",
+          "description": "What it asks for."
+        },
+        "source": {
+          "$ref": "#/$defs/InboxSource",
+          "default": {},
+          "description": "Where it comes from."
+        },
+        "title": {
+          "description": "A one-line summary.",
+          "type": "string"
+        },
+        "type": {
+          "const": "inboxItemAdded"
+        }
+      },
+      "required": [
+        "type",
+        "itemId",
+        "kind",
+        "title"
+      ],
+      "type": "object"
+    },
+    "InboxItemKind": {
+      "description": "What an inbox item asks for.",
+      "oneOf": [
+        {
+          "const": "approval",
+          "description": "Approve or reject something, for example a plan."
+        },
+        {
+          "const": "question",
+          "description": "Answer a question."
+        },
+        {
+          "const": "choice",
+          "description": "Pick one of several options, for example one of 4 images."
+        },
+        {
+          "const": "manualTask",
+          "description": "Do something by hand, then confirm."
+        },
+        {
+          "const": "permission",
+          "description": "An agent asks for permission to use a tool."
+        },
+        {
+          "const": "review",
+          "description": "Review a change."
+        },
+        {
+          "const": "escalation",
+          "description": "Something needs a human to step in, for example a review loop that doesn't converge."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "approval",
+              "question",
+              "choice",
+              "manualTask",
+              "permission",
+              "review",
+              "escalation"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
+    },
+    "InboxItemResolved": {
+      "description": "`inboxItemResolved`: an inbox item no longer needs an answer.",
+      "properties": {
+        "action": {
+          "description": "The id of the action chosen. Absent when the item expired.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "by": {
+          "description": "Who answered: a device id, or `local`. Absent when the item expired.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "description": "The inbox item's id.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/InboxItemStatus",
+          "description": "`resolved` or `expired`; never `open`."
+        },
+        "type": {
+          "const": "inboxItemResolved"
+        }
+      },
+      "required": [
+        "type",
+        "itemId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "InboxItemStatus": {
+      "description": "Whether an inbox item still needs an answer.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Waiting for an answer.",
+          "type": "string"
+        },
+        {
+          "const": "resolved",
+          "description": "Answered.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "Nobody answered in time.",
+          "type": "string"
+        }
+      ]
+    },
+    "InboxSource": {
+      "description": "Where an inbox item comes from. Every member is optional.",
+      "properties": {
+        "runId": {
+          "description": "The run that asked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "description": "The session that asked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stepPath": {
+          "description": "The step that asked, within `runId`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InitializeParams": {
+      "description": "`initialize` params: the client introduces itself.",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/ClientCapabilities",
+          "default": {
+            "mediaTypes": [],
+            "terminal": false
+          },
+          "description": "What the client can do."
+        },
+        "client": {
+          "$ref": "#/$defs/ClientInfo",
+          "description": "Who the client is."
+        },
+        "protocolVersion": {
+          "description": "The protocol version the client speaks. Version 0 must match the server's exactly.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "client"
+      ],
+      "type": "object"
+    },
+    "InitializeResult": {
+      "description": "`initialize` result: the server introduces itself.",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/ServerCapabilities",
+          "default": {
+            "flows": false,
+            "remote": false
+          },
+          "description": "What the server can do."
+        },
+        "connectionId": {
+          "description": "This connection's id (`con_…`). Remote clients sign it during authentication.",
+          "type": "string"
+        },
+        "protocolVersion": {
+          "description": "The protocol version the server speaks.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server": {
+          "$ref": "#/$defs/ServerInfo",
+          "description": "Who the server is."
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "server",
+        "connectionId"
+      ],
+      "type": "object"
+    },
+    "Message": {
+      "description": "Any one JSON-RPC 2.0 message: one line on the named pipe or stdin/stdout, or one WebSocket text frame.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Request"
+        },
+        {
+          "$ref": "#/$defs/Response"
+        },
+        {
+          "$ref": "#/$defs/Notification"
+        }
+      ]
+    },
+    "Notification": {
+      "description": "A one-way message. It gets no response.",
+      "not": {
+        "required": [
+          "id"
+        ]
+      },
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0",
+          "description": "Always `\"2.0\"`.",
+          "type": "string"
+        },
+        "method": {
+          "description": "`area/verb`, for example `events/event`.",
+          "type": "string"
+        },
+        "params": {
+          "description": "The notification's params. Burrow's notifications take an object; absent means `{}`."
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "type": "object"
+    },
+    "Request": {
+      "description": "A call that expects a response with the same id.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "Chosen by the sender; the response carries it back."
+        },
+        "jsonrpc": {
+          "const": "2.0",
+          "description": "Always `\"2.0\"`.",
+          "type": "string"
+        },
+        "method": {
+          "description": "`area/verb`, for example `events/subscribe`.",
+          "type": "string"
+        },
+        "params": {
+          "description": "The method's params. Burrow's methods take an object; absent means `{}`."
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "description": "A request id: an integer or a string, unique among the sender's pending requests.",
+      "type": [
+        "integer",
+        "string"
+      ]
+    },
+    "Response": {
+      "description": "The answer to a request: a result or an error, never both.",
+      "oneOf": [
+        {
+          "description": "The method's result.",
+          "properties": {
+            "result": true
+          },
+          "required": [
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Why the request failed.",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ErrorObject"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The id of the request being answered. `null` only on an error about a line whose id couldn't be read."
+        },
+        "jsonrpc": {
+          "const": "2.0",
+          "description": "Always `\"2.0\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ServerCapabilities": {
+      "description": "What the server can do. Every capability defaults to off when absent.",
+      "properties": {
+        "flows": {
+          "default": false,
+          "description": "The flow engine is available.",
+          "type": "boolean"
+        },
+        "remote": {
+          "default": false,
+          "description": "Remote connections are enabled.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ServerInfo": {
+      "description": "The server's name and version.",
+      "properties": {
+        "name": {
+          "description": "`burrowd`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The server's own version, for example `0.1.0`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "StreamEvent": {
+      "description": "`events/event` params: one event from a subscribed stream.",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the event was appended."
+        },
+        "event": {
+          "$ref": "#/$defs/Event",
+          "description": "The event itself."
+        },
+        "seq": {
+          "description": "The event's position in its stream, from 1, with no gaps.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamName",
+          "description": "The stream the event belongs to."
+        }
+      },
+      "required": [
+        "stream",
+        "seq",
+        "at",
+        "event"
+      ],
+      "type": "object"
+    },
+    "StreamName": {
+      "description": "The name of an event stream: `index`, `session:<sessionId>` or `run:<runId>`.",
+      "type": "string"
+    },
+    "SubscribeParams": {
+      "description": "`events/subscribe` params.",
+      "properties": {
+        "after": {
+          "description": "Replay events with a `seq` greater than this, then follow live. Leave it out to receive only new events; `0` replays the full history.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamName",
+          "description": "The stream to follow."
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "type": "object"
+    },
+    "SubscribeResult": {
+      "description": "`events/subscribe` result. Replayed events follow as `events/event` notifications.",
+      "properties": {
+        "head": {
+          "description": "The `seq` of the stream's latest event when the subscription started; `0` if it has none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reset": {
+          "description": "The requested history isn't available, for example after compaction, or `after` is beyond `head`. Nothing is replayed: reload state with `*/get`. Live events after `head` still follow.",
+          "type": "boolean"
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamName",
+          "description": "The stream subscribed to."
+        }
+      },
+      "required": [
+        "stream",
+        "head"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "description": "An instant in UTC: RFC 3339 with exactly three fractional digits and `Z`, for example `2026-11-06T14:03:22.418Z`.",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "UnknownEvent": {
+      "description": "An event type added by a newer protocol revision. Show it as an unsupported event and keep going; never fail on it.",
+      "properties": {
+        "type": {
+          "not": {
+            "enum": [
+              "entityCreated",
+              "entityRenamed",
+              "entityStateChanged",
+              "entityRemoved",
+              "inboxItemAdded",
+              "inboxItemResolved"
+            ]
+          },
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "UnsubscribeParams": {
+      "description": "`events/unsubscribe` params.",
+      "properties": {
+        "stream": {
+          "$ref": "#/$defs/StreamName",
+          "description": "The stream to stop following."
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Message",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Burrow's client and step protocol: JSON-RPC 2.0 messages, one per line. Generated from the burrow-protocol crate by `cargo xtask schema`; do not edit. docs/protocol.md explains the intent.",
+  "title": "Burrow protocol",
+  "x-burrow-methods": {
+    "$/ping": {
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "debug/append": {
+      "params": {
+        "$ref": "#/$defs/DebugAppendParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DebugAppendResult"
+      }
+    },
+    "events/subscribe": {
+      "params": {
+        "$ref": "#/$defs/SubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SubscribeResult"
+      }
+    },
+    "events/unsubscribe": {
+      "params": {
+        "$ref": "#/$defs/UnsubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "initialize": {
+      "params": {
+        "$ref": "#/$defs/InitializeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InitializeResult"
+      }
+    }
+  },
+  "x-burrow-notifications": {
+    "$/cancel": {
+      "params": {
+        "$ref": "#/$defs/CancelParams"
+      }
+    },
+    "events/event": {
+      "params": {
+        "$ref": "#/$defs/StreamEvent"
+      }
+    }
+  },
+  "x-burrow-protocol-version": 0
+}

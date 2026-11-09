@@ -17,6 +17,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-008](#d-008-remote-access-v1-runs-over-tailscalewireguard-with-per-device-keys) | Remote access v1 runs over Tailscale/WireGuard with per-device keys | 2026-11-05 | accepted |
 | [D-009](#d-009-agents-act-on-github-through-a-github-app) | Agents act on GitHub through a GitHub App | 2026-11-05 | accepted |
 | [D-010](#d-010-burrow-ships-its-own-windows-manifest) | Burrow ships its own Windows manifest | 2026-11-05 | accepted |
+| [D-011](#d-011-protocol-types-typed-method-markers-millisecond-timestamps-open-enums) | Protocol types: typed method markers, millisecond timestamps, open enums | 2026-11-09 | accepted |
 | [D-012](#d-012-the-event-store-syncs-every-commit-to-disk) | The event store syncs every commit to disk | 2026-11-09 | accepted |
 
 ---
@@ -176,6 +177,27 @@ GPUI's default `windows-manifest` feature is turned off.
 - Ours adds long-path and UTF-8 support, which matter for repo paths and agent output.
 
 **Consequences.** When upgrading GPUI, check whether its manifest gained settings we should copy.
+
+## D-011 Protocol types: typed method markers, millisecond timestamps, open enums
+
+**Decision.** `burrow-protocol` follows these conventions:
+- **One marker type per method.** `methods::EventsSubscribe` implements `trait Method { const NAME; type Params; type Result; }`, and notifications implement `NotificationMethod { const NAME; type Params; }`. `visit_methods` walks the one table of every method; the server, the clients and the schema export all use it.
+- **Times are `burrow_protocol::Timestamp`,** a newtype over `jiff::Timestamp` truncated to the millisecond. It always serializes as `YYYY-MM-DDTHH:MM:SS.mmmZ` and parses any RFC 3339 instant. `jiff` is the workspace's time crate.
+- **Open enums for values a newer peer may extend within a version:** error kinds, entity kinds and inbox item kinds. An unknown value decodes into `Other(String)` and is sent back unchanged. All other enums are closed.
+- **One `Event` enum for every stream.** Event `type` names are unique across streams. An unknown `type` decodes into `Event::Unknown`, which keeps the raw JSON.
+- **The schema is canonical.** `cargo xtask schema` writes it with sorted keys, and a test compares it with the committed file.
+
+**Why.**
+- Marker types make a call and its handler agree on types at compile time, and keep method names in one place. The same pattern as `lsp-types`.
+- A newtype is the only way to guarantee the three-digit wire format; `jiff`'s own serde output drops trailing zeros. Truncating when a value is made keeps round trips exact, including through SQLite. `jiff` was picked over `chrono` and `time` for its correct, simple `Timestamp` type and its time zone support, which the app will need for display.
+- Open enums let a newer `burrowd` add an error kind or entity kind without breaking older clients, which protocol.md's forward-compatibility rules require for events.
+- A client follows several streams on one connection. One decoder, keyed by `type`, is simpler than choosing an enum from the stream name.
+- serde_json's map order depends on whether GPUI is in the build (it turns on `preserve_order`), so only a sorted schema is stable.
+
+**Consequences.**
+- Adding a method means adding one line to the table in `method.rs`, then regenerating the schema.
+- New event types must not reuse a name from another stream.
+- Code that needs a time zone or arithmetic converts with `Timestamp::as_jiff`.
 
 ## D-012 The event store syncs every commit to disk
 

@@ -1,8 +1,10 @@
 # Burrow protocol
 
-> **Status:** draft, protocol version 0. Anything may change until version 1. Last updated 2026-11-06.
+> **Status:** draft, protocol version 0. Anything may change until version 1. Last updated 2026-11-09.
 >
-> **Source of truth (D-004):** once written, the Rust types in `crates/burrow-protocol` define the protocol. This document explains the intent. The JSON Schema generated from those types is the exact contract.
+> **Source of truth (D-004):** the Rust types in `crates/burrow-protocol` define the protocol. This document explains the intent. The JSON Schema generated from those types, [`schema/burrow-protocol.schema.json`](../schema/burrow-protocol.schema.json), is the exact contract. Regenerate it with `cargo xtask schema` whenever the types change; a test fails if it's out of date.
+>
+> **Implemented so far (M1):** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods). The rest of this document is design that has no Rust types yet.
 
 Burrow speaks two protocols of its own:
 
@@ -13,11 +15,14 @@ Agents are reached through their own protocols, ACP and MSP. Those aren't Burrow
 
 **Contents**
 - [Common rules](#common-rules)
-- [Part 1: Client protocol](#part-1-client-protocol): [events](#state-model-everything-is-an-event) · [connection](#connection-and-devices) · [projects](#projects) · [agents and roles](#agents-roles-and-usage) · [sessions](#sessions) · [terminals](#terminals) · [flows and runs](#flows-and-runs) · [inbox](#inbox) · [artifacts](#artifacts) · [remote authentication](#remote-authentication)
+- [Part 1: Client protocol](#part-1-client-protocol): [events](#state-model-everything-is-an-event) · [connection](#connection-and-devices) · [development methods](#development-methods) · [projects](#projects) · [agents and roles](#agents-roles-and-usage) · [sessions](#sessions) · [terminals](#terminals) · [flows and runs](#flows-and-runs) · [inbox](#inbox) · [artifacts](#artifacts) · [remote authentication](#remote-authentication)
 - [Part 2: Step protocol](#part-2-step-protocol)
+- [Revision notes](#revision-notes)
 - [Open questions](#open-questions)
 
 Shapes are written in TypeScript notation because it's compact. The wire format is JSON.
+
+The `jsonc` code blocks are complete messages, one per line, with `//` comments. A test (`crates/burrow-protocol/tests/doc_examples.rs`) decodes every one of them with the Rust types, so keep them valid. Use a `ts` or `json` block for partial shapes.
 
 ---
 
@@ -34,6 +39,11 @@ Every message is JSON-RPC 2.0:
 | Notification | Like a request but without `id`. It gets no response. |
 
 Either side may send requests. Batches aren't used.
+
+- **Ids** are integers or strings, chosen by the sender and unique among its own pending requests. Requests never use `null`.
+- **`params`** is an object. Leaving it out means `{}`.
+- **Responses** have exactly one of `result` or `error`. The `id` is `null` only on an error about a line whose id couldn't be read.
+- **Malformed lines** are answered with an error: `-32700` if the line isn't JSON, `-32600` if it's JSON but not a valid message (including a batch). The error carries the line's `id` when it could be read.
 
 ### Framing
 
@@ -54,11 +64,12 @@ Serialised JSON never contains a raw newline, so one message per line is safe. L
   - `plan`: a top-level step;
   - `keyframes[3]`: item 3 of a `foreach`;
   - `review#2/fix`: step `fix` in iteration 2 of loop `review`.
-- **Times** are RFC 3339 UTC strings with milliseconds: `2026-11-06T14:03:22.418Z`.
+- **Times** are RFC 3339 UTC strings with exactly three fractional digits and a `Z`: `2026-11-06T14:03:22.418Z`. Senders always write that form. Receivers accept any RFC 3339 instant and truncate it to the millisecond (D-011).
 - **Forward compatibility:**
   - Unknown fields must be ignored.
   - Unknown notifications must be ignored.
   - An unknown event type is shown as "unsupported event"; it must never break the client.
+  - Some enums are **open**: a newer peer may add values within a version, and a receiver keeps a value it doesn't know instead of failing. They are error kinds, entity kinds and inbox item kinds. Every other enum, such as the client kind, changes only with the protocol version.
 
 ### Handshake and versioning
 
@@ -84,6 +95,7 @@ The first request on every connection is `initialize`:
 - **Within a version, changes are additive only:** new optional fields, new methods, new event types. Anything else bumps the version.
 - If the versions are incompatible, `burrowd` answers with the error `versionMismatch` and lists the versions it supports. The client should then ask the user to update.
 - **Version 0 is unstable.** Both sides must match exactly.
+- **Capabilities** that are left out are off. Unknown capabilities are ignored.
 
 ### Errors
 
@@ -100,6 +112,17 @@ Errors use JSON-RPC error codes. Burrow's own errors also carry a **kind** in `e
 | -32006 | `versionMismatch` | Incompatible protocol versions. `data.supported` lists the supported ones. |
 | -32007 | `cancelled` | The request was cancelled |
 | -32008 | `unavailable` | Something needed is missing, for example the agent isn't installed or the provider isn't configured |
+
+`error.data` is an object:
+
+| Field | Present on |
+|---|---|
+| `kind` | Every Burrow error (-32001 to -32008). Absent on standard errors. |
+| `supported: number[]` | `versionMismatch`: the protocol versions `burrowd` supports |
+| `resetsAt: string` | `limitReached`, when the reset time is known |
+
+- A client treats a `kind` it doesn't know as a generic failure.
+- Without `data.kind`, a code from -32001 to -32008 still names its kind.
 
 ### Cancelling a request
 
@@ -124,20 +147,42 @@ Domain operations have their own methods, for example `session/cancel` to stop a
 A client reads current state with the `*/get` and `*/list` methods, then follows changes by subscribing:
 
 ```jsonc
-→ {"id":5,"method":"events/subscribe","params":{"stream":"session:ses_01JC…","after":120}}
-← {"id":5,"result":{"stream":"session:ses_01JC…","head":187}}
-← {"method":"events/event","params":{"stream":"session:ses_01JC…","seq":121,"at":"2026-11-06T14:03:22.418Z",
-     "event":{"type":"agentMessageChunk","turnId":"trn_…","text":"Reading the issue…"}}}
-   … events 122 to 187 are replayed, then live events follow as they happen
+// client → burrowd
+{"jsonrpc":"2.0","id":5,"method":"events/subscribe","params":{"stream":"session:ses_01JC…","after":120}}
+// burrowd → client
+{"jsonrpc":"2.0","id":5,"result":{"stream":"session:ses_01JC…","head":187}}
+{"jsonrpc":"2.0","method":"events/event","params":{"stream":"session:ses_01JC…","seq":121,"at":"2026-11-06T14:03:22.418Z",
+  "event":{"type":"agentMessageChunk","turnId":"trn_…","text":"Reading the issue…"}}}
+// … events 122 to 187 are replayed, then live events follow as they happen
 ```
 
 How subscriptions behave:
 - **`after`:** leave it out to receive only new events. Use `after: 0` for the full history.
 - **Order and gaps:** events arrive in order, at most once per subscription. A client that reconnects subscribes again with the last `seq` it processed, and sees no gaps.
-- **Missing history:** if the requested range is no longer available (see compaction in the open questions), `burrowd` answers `{"reset": true, "head": N}`. The client then reloads state with `*/get`.
-- **Ending:** `events/unsubscribe {stream}` ends a subscription. All subscriptions end when the connection closes.
+- **Head:** `head` is the `seq` of the stream's latest event when the subscription starts, or `0` for a stream with no events.
+- **Missing history:** if the requested range is no longer available (see compaction in the open questions), `burrowd` answers `{"stream": …, "head": N, "reset": true}` and replays nothing. The client then reloads state with `*/get`; live events after `head` still follow. An `after` greater than `head`, for example after the database was replaced, gets the same answer.
+- **Ending:** `events/unsubscribe {stream}` ends a subscription and returns `{}`. All subscriptions end when the connection closes.
+- **Event types are unique across all streams,** so one decoder handles every stream. In Rust that's the `Event` enum.
 
 Streaming agent text is stored too, in chunks of about 100 ms. A client that connects partway through an answer replays it exactly.
+
+#### Index stream events
+
+Lists are built from the `index` stream. A client subscribes once and keeps its project, session, run and inbox lists current without following every other stream. Each event is a lightweight summary; `*/get` has the full entity.
+
+| `type` | Fields |
+|---|---|
+| `entityCreated` | `entity, id, title?, projectId?, state?` |
+| `entityRenamed` | `entity, id, title` |
+| `entityStateChanged` | `entity, id, state` |
+| `entityRemoved` | `entity, id`. The entity left the default lists: a project was removed, or a session or run was archived. |
+| `inboxItemAdded` | `itemId, kind, title, source`. Enough for a list entry or a phone notification. |
+| `inboxItemResolved` | `itemId, status (resolved/expired), action?, by?`. `action` and `by` are absent when the item expired. |
+
+- **`entity`** is `project`, `session` or `run`. It's an open enum: a client ignores events about kinds it doesn't show.
+- **`title`** is the display name: a project's name, or a session's or run's title.
+- **`state`** is a string: one of the [session states](#sessions) or [run states](#flows-and-runs). A client shows a state it doesn't know as it is.
+- **`kind`** and **`source`** have the same shapes as in [`InboxItem`](#inbox). `by` is a device id or `local`.
 
 ### Connection and devices
 
@@ -149,6 +194,14 @@ Streaming agent text is stored too, in chunks of about 100 ms. A client that con
 | `device/revoke {deviceId}` | Revoke a device's key immediately |
 | `pairing/create {permissions}` | Local clients only: create a one-time pairing code, shown as a QR code |
 | `auth/pair`, `auth/challenge`, `auth/prove` | Remote clients only. See [remote authentication](#remote-authentication). |
+
+### Development methods
+
+These exist for tests and debugging. `burrowd` accepts them only when started with `--dev`; otherwise it answers `-32601` (method not found).
+
+| Method | Params → Result |
+|---|---|
+| `debug/append` | `{stream, event}` → `{seq}`. Appends `event` to `stream` as if `burrowd` had produced it, and delivers it to subscribers. Any stream name and any event `type` are accepted. M1's integration test uses it. |
 
 ### Projects
 
@@ -436,6 +489,17 @@ A code flow is an RPC-mode program that drives a whole run ([flows.md](flows.md#
 Which language gets an SDK first is an open decision ([plan.md](plan.md#open-decisions)).
 
 ---
+
+## Revision notes
+
+**2026-11-09, Rust types for M1.** Writing `burrow-protocol` settled details the text above didn't pin down. They're now stated in their sections:
+- The subscription example shows complete messages; it used to leave out `"jsonrpc":"2.0"`. The `reset` answer includes `stream`, like every `events/subscribe` result.
+- `head` is `0` for an empty stream. An `after` beyond `head` gets `reset`. `events/unsubscribe` returns `{}`.
+- Absent `params` means `{}`. Request ids are integers or strings, never `null`. How malformed lines are answered.
+- The shape of `error.data`, and how unknown error kinds are handled.
+- Capabilities left out are off.
+- Senders write exactly three fractional digits in times; receivers accept any RFC 3339 instant.
+- New: open enums, event types unique across streams, the [`index` stream events](#index-stream-events), and [`debug/append`](#development-methods).
 
 ## Open questions
 

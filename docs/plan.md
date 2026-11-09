@@ -36,13 +36,14 @@ Every milestone ends with something you can run.
 
 ## M1: Protocol and service skeleton
 
-- [ ] **`burrow-protocol` types:** the JSON-RPC envelope, `initialize`, errors, `events/subscribe`, and the `index` stream events. Use serde with camelCase field names.
-- [ ] **Schema export:** generate a JSON Schema with `schemars`, written to `schema/burrow-protocol.schema.json` by `cargo xtask schema`. A test fails if the file is out of date.
+- [x] **`burrow-protocol` types:** the JSON-RPC envelope, `initialize`, errors, `events/subscribe`, and the `index` stream events. Use serde with camelCase field names. Also `$/ping`, `$/cancel`, `events/unsubscribe` and the development-only `debug/append` (D-011).
+- [x] **Schema export:** generate a JSON Schema with `schemars`, written to `schema/burrow-protocol.schema.json` by `cargo xtask schema`. A test fails if the file is out of date.
 - [x] **`burrow-store`:** an SQLite event store (`rusqlite`, WAL mode) that appends and reads streams with gap-free sequence numbers. Database changes go through numbered migrations. Every commit is synced to disk (D-012).
 - [ ] **`burrowd` server:**
   - named pipe server (`tokio`), restricted to the current user;
   - one task per connection;
-  - `initialize`, `$/ping` and `events/subscribe` with replay.
+  - `initialize`, `$/ping` and `events/subscribe` with replay;
+  - `debug/append`, accepted only with `--dev`, for the integration test.
 - [ ] **`burrow-client`:** connection handling plus typed calls.
 - [ ] **`burrowctl`:** `status`, and `events tail <stream>`.
 - [ ] **Logging:** `burrowd` logs with `tracing` to `%LOCALAPPDATA%\Burrow\logs`.
