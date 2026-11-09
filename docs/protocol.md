@@ -7,7 +7,7 @@
 > **Implemented so far:**
 > - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
 > - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `agent/install`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
-> - **M3:** `session/rename`, `lastActivityAt` on sessions and on `entityStateChanged`, lists sorted by activity, Muse's approval modes as agent modes, and permission requests the agent withdraws ([revision note](#revision-notes)).
+> - **M3:** `session/rename`, `lastActivityAt` on sessions and on `entityStateChanged`, lists sorted by activity, Muse's approval modes as agent modes, and permission requests the agent withdraws. Then, for the app's controls: the agent on a session's `entityCreated`, the actions on `inboxItemAdded`, and `AgentInfo.agentModes` ([revision notes](#revision-notes)).
 >
 > `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
@@ -194,26 +194,27 @@ Lists are built from the `index` stream. A client subscribes once and keeps its 
 
 | `type` | Fields |
 |---|---|
-| `entityCreated` | `entity, id, title?, projectId?, state?` |
+| `entityCreated` | `entity, id, title?, projectId?, state?, agent?` |
 | `entityRenamed` | `entity, id, title` |
 | `entityStateChanged` | `entity, id, state, lastActivityAt?` |
 | `entityRemoved` | `entity, id`. The entity left the default lists: a project was removed, or a session or run was archived. |
-| `inboxItemAdded` | `itemId, kind, title, source`. Enough for a list entry or a phone notification. |
+| `inboxItemAdded` | `itemId, kind, title, source, actions?`. Enough for a list entry with its buttons, or a phone notification. |
 | `inboxItemResolved` | `itemId, status (resolved/expired), action?, by?`. `action` and `by` are absent when the item expired. |
 
 What `burrowd` puts on the index, so far:
 - **Projects:** `entityCreated` (with `title`, the project's name) on `project/add`; `entityRemoved` on `project/remove`.
-- **Sessions:** `entityCreated` (with `title` when given, `projectId`, and `state: "starting"`) on `session/create`; `entityStateChanged` on every state change, and whenever the session's `lastActivityAt` moves; `entityRenamed` when the first prompt gives the session its title, and on `session/rename`; `entityRemoved` on `session/archive`.
-- **Inbox:** `inboxItemAdded` for each permission request; `inboxItemResolved` when it is answered or expires.
+- **Sessions:** `entityCreated` (with `title` when given, `projectId`, `state: "starting"` and the `agent`) on `session/create`; `entityStateChanged` on every state change, and whenever the session's `lastActivityAt` moves; `entityRenamed` when the first prompt gives the session its title, and on `session/rename`; `entityRemoved` on `session/archive`.
+- **Inbox:** `inboxItemAdded` for each permission request, with the item's `actions`; `inboxItemResolved` when it is answered or expires.
 
-**A sidebar from the index alone.** A session's `entityStateChanged` always carries its `lastActivityAt` (when a turn last started or ended), so a list sorted like `session/list` re-sorts without a `session/get`. A turn starting or ending almost always changes the state too; the exception is a turn that ends in `limited`, already `limited` since its `limitReached`, which gets an `entityStateChanged` with the same state and the new `lastActivityAt`. A new session's `lastActivityAt` is its `createdAt`, the `at` of its `entityCreated`.
+**A sidebar from the index alone.** A session's `entityCreated` carries its agent, and an item's `inboxItemAdded` its actions, so a new list entry is complete without `session/get` or `inbox/get` (D-035). A client fetches only when they are absent, from an older `burrowd`, and for what the summaries never carry: a project's path, an item's `body` or `form`. A session's `entityStateChanged` always carries its `lastActivityAt` (when a turn last started or ended), so a list sorted like `session/list` re-sorts without a `session/get`. A turn starting or ending almost always changes the state too; the exception is a turn that ends in `limited`, already `limited` since its `limitReached`, which gets an `entityStateChanged` with the same state and the new `lastActivityAt`. A new session's `lastActivityAt` is its `createdAt`, the `at` of its `entityCreated`.
 
 The summary and the change it summarises are committed together (D-017): a client never sees one without the other.
 
 - **`entity`** is `project`, `session` or `run`. It's an open enum: a client ignores events about kinds it doesn't show.
 - **`title`** is the display name: a project's name, or a session's or run's title.
 - **`state`** is a string: one of the [session states](#sessions) or [run states](#flows-and-runs). A client shows a state it doesn't know as it is.
-- **`kind`** and **`source`** have the same shapes as in [`InboxItem`](#inbox). `by` is a device id or `local`.
+- **`kind`**, **`source`** and **`actions`** have the same shapes as in [`InboxItem`](#inbox). `by` is a device id or `local`.
+- **`agent`** is a session's [`AgentId`](#agents-roles-and-usage).
 
 ### Connection and devices
 
@@ -281,6 +282,7 @@ type AgentInfo = {
   installed: boolean; version?: string; path?: string;
   login: { state: "loggedIn" | "loggedOut" | "unknown" | string; account?: string; detail?: string };
   models?: { id: string; name?: string }[];  // ids session/create accepts; see below
+  agentModes?: { id: string; name?: string; description?: string }[];  // what agentMode accepts; see below
   available: boolean;                        // session/create can start it now
   problem?: string;                          // why not, or what looks wrong
   adapter?: AdapterInfo;                     // the npm ACP adapter Burrow runs it through, if any
@@ -309,6 +311,7 @@ How detection works (M2):
 - **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota, and `fake-acp`, a scripted agent that speaks ACP and runs through the same adapter as Claude Code, Codex and Cursor.
 - **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login. Each runs in its own Job Object with a 20-second timeout. For Muse they run its versioned binary, and a throwaway `muse serve --provider echo` gives its models and whether its shell sandbox is set up.
 - **`models`** are ids `session/create` and `session/setModel` accept (D-032). Detection gives them where that's cheap: Muse's catalog, the fakes' lists. Claude Code, Codex and Cursor only say which models they offer once a session is open, so for them `models` is what the agent's latest session offered (`Session.models`), remembered from the stored sessions across restarts, and empty until a session has run. Cursor's `agent models` isn't used: it lists ids such as `gpt-5.3-codex-high` that Cursor's ACP sessions don't accept.
+- **`agentModes`** are the [agent modes](#sessions) `session/create`'s `agentMode` accepts, with their names and descriptions, so a client can offer them before a session exists (D-035). Like `models`: Muse's four approval modes are known at detection (D-031); for Claude Code, Codex, Cursor and `fake-acp` they are the modes of the agent's latest session, remembered across restarts, and empty until a session has run. `fake` has none.
 - **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
 - **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. For Claude Code and Codex it is also false while their ACP adapter (`adapter`) isn't installed, or Node.js isn't on `PATH`, and `problem` names the `burrowctl agent install` command. An available agent can have a `problem` too, for something that looks wrong, such as Muse's shell sandbox not being set up.
 - **`defaultAgentMode`** is the [agent mode](#sessions) a session starts in when `session/create` names none: `default` for Claude Code and `read-only` for Codex, both of which ask before edits and commands, and `promptUnmatched` for Muse, which asks before anything its policy doesn't already allow (D-031). Cursor has none and keeps its own default, `agent`, which asks before shell commands but never before file edits (D-024).
@@ -729,6 +732,11 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **Muse's approval modes** are its agent modes, starting in `promptUnmatched`; `AgentInfo.defaultAgentMode` says so (D-031).
 - **Withdrawn permission requests** expire at once, with `permissionResolved` and `inboxItemResolved` (`expired`), and the session goes back to `working` (D-031).
 - **Models:** `AgentInfo.models` are ids sessions accept, from the agent's latest session where detection can't tell; a model can be named by its `name` (D-032). Cursor's `agent models` is no longer read.
+
+**2026-11-09, the desktop app's session controls.** Additive, so the app needs no per-entry fetches and can offer a session's settings up front; the schema is regenerated (D-035):
+- **`entityCreated` gained `agent?`:** a session's agent, always sent by `burrowd`.
+- **`inboxItemAdded` gained `actions?`:** the item's actions, always sent by `burrowd`. A client fetches `inbox/get` only when they are absent.
+- **`AgentInfo` gained `agentModes?`:** the modes `agentMode` accepts, with descriptions. Muse's from detection; the ACP agents' from their latest session, as `models` are (D-032).
 
 ## Open questions
 

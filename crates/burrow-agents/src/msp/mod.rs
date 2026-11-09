@@ -227,9 +227,11 @@ async fn detect_muse() -> AgentInfo {
             detail: None,
         },
         models: Vec::new(),
+        // Muse's agent modes are its approval modes, the same in every session (D-031).
+        agent_modes: session::agent_modes(),
         available: false,
         problem: None,
-        // Muse has no adapter to install. Its agent modes are its approval modes (D-031).
+        // Muse has no adapter to install.
         adapter: None,
         default_agent_mode: Some(session::DEFAULT_MODE.as_str().to_owned()),
         detected_at: Timestamp::now(),

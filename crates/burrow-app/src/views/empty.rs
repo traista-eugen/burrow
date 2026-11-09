@@ -34,7 +34,7 @@ pub fn render(
     let theme = cx.theme().clone();
     let state = workspace.state().read(cx);
     let connected = state.connection().is_connected();
-    let has_sessions = !state.index().sessions().is_empty();
+    let has_sessions = !state.index().sessions(false).is_empty();
     let inbox = state.index().inbox_count();
     let detail = match state.connection() {
         ConnectionStatus::Connected { .. } if has_sessions => {

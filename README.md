@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app runs sessions: a sidebar of projects and sessions, an inbox, a new session page that picks the agent, model and agent mode, and a session view with a model and mode picker, usage, limits and the prompt box; its transcript is being rebuilt. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -20,6 +20,7 @@ cargo build --workspace
 cargo run -p burrow-app     # desktop app (burrow.exe)
 cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
 cargo xtask icons           # regenerate the .ico files from assets/icon/*.svg
+cargo xtask measure         # the release app's startup time and memory, against a throwaway burrowd
 cargo test -p burrow-msp    # the Muse client; drives `muse serve --provider echo` if Muse is installed
 cargo test -p burrowd --test muse   # Muse sessions through burrowd, on the free echo provider
 ```
@@ -49,10 +50,10 @@ cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"
 
 ```powershell
 cargo build --workspace
-target\debugurrow.exe --pipe burrow-try --burrowd-args "--dev --data-dir $env:TEMPurrow-try"
+target\debug\burrow.exe --pipe burrow-try --burrowd-args "--dev --data-dir $env:TEMP\burrow-try"
 ```
 
-On another pipe the app starts `burrowd` only when given `--burrowd-args` (or `BURROWD_ARGS`); `BURROW_PIPE` works like `--pipe`. Keys: Ctrl+N new session, Ctrl+L focus the prompt, Ctrl+I inbox, Ctrl+O add a project, Esc stops a turn.
+On another pipe the app starts `burrowd` only when given `--burrowd-args` (or `BURROWD_ARGS`); `BURROW_PIPE` works like `--pipe`. `--open <sessionId>` opens a session at startup. Keys: Ctrl+N new session, Ctrl+L focus the prompt, Ctrl+I inbox, Ctrl+O add a project, Esc stops a turn, Up in an empty prompt box recalls earlier prompts. Right-click a session in the sidebar to rename or archive it.
 
 ### Try a session with the fake agent
 

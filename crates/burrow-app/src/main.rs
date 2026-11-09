@@ -4,13 +4,15 @@
 //! - [`backend`]: the connection to `burrowd` (reconnects, starting it, resumable streams);
 //! - [`state`]: shared state as GPUI entities, with plain models underneath;
 //! - [`views`]: the window, laid out as described there;
-//! - [`actions`], [`theme`], [`args`], [`startup`]: keys, looks, arguments, startup timing.
+//! - [`actions`], [`theme`], [`assets`], [`args`], [`startup`]: keys, looks, icons, arguments,
+//!   startup and memory measurements.
 
 // Release builds are GUI apps: no console window behind the main window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
 mod args;
+mod assets;
 mod backend;
 mod startup;
 mod state;
@@ -46,7 +48,7 @@ fn main() {
     };
 
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
+        .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             theme::apply(cx);
@@ -63,6 +65,9 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            let first_frame = startup::FirstFrameCell::default();
+            let open = args.open.clone();
+            let measure = args.measure.clone();
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -74,8 +79,19 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    window.on_next_frame(move |_, _| startup::report_first_frame(main_started));
-                    let workspace = cx.new(|cx| Workspace::new(state, window, cx));
+                    let cell = first_frame.clone();
+                    window.on_next_frame(move |_, _| {
+                        cell.set(Some(startup::report_first_frame(main_started)));
+                    });
+                    let workspace = cx.new(|cx| Workspace::new(state.clone(), window, cx));
+                    for session_id in open {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.open_session(session_id, window, cx)
+                        });
+                    }
+                    if let Some(out) = measure {
+                        startup::measure(out, first_frame, state, workspace.clone(), cx);
+                    }
                     cx.new(|cx| Root::new(workspace, window, cx))
                 },
             );

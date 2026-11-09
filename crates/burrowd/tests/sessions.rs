@@ -218,8 +218,10 @@ async fn a_prompt_streams_its_answer_back() {
         |event| matches!(event, Event::EntityStateChanged(changed) if changed.state == "idle"),
     )
     .await;
+    // The index entry is complete: the agent comes with it, so a list needs no session/get.
     assert!(matches!(&summaries[0].event, Event::EntityCreated(created)
-        if created.id == session.id && created.state.as_deref() == Some("starting")));
+        if created.id == session.id && created.state.as_deref() == Some("starting")
+            && created.agent == Some(AgentId::Fake)));
     let list = client
         .call::<SessionList>(&SessionListParams::default())
         .await
@@ -288,8 +290,10 @@ async fn a_permission_request_waits_in_the_inbox_until_answered() {
         matches!(event, Event::InboxItemAdded(_))
     })
     .await;
+    // With the item's actions, so a list can show its buttons without inbox/get.
     assert!(
-        matches!(&added.last().unwrap().event, Event::InboxItemAdded(added) if added.item_id == item.id)
+        matches!(&added.last().unwrap().event, Event::InboxItemAdded(added)
+            if added.item_id == item.id && added.actions.as_ref() == Some(&item.actions))
     );
 
     // A wrong action is refused and changes nothing.

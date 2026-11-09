@@ -101,6 +101,7 @@ impl Projects {
                     title: Some(project.name.clone()),
                     project_id: None,
                     state: None,
+                    agent: None,
                 },
             )
             .put(KIND, &project.id, &project);

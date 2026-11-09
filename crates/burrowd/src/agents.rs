@@ -5,12 +5,15 @@
 //! and the ids match a session's (Muse, the fakes). For the others, the models of the agent's
 //! latest session are reported: an ACP agent only says which models it offers once a session
 //! is open, and Cursor's `agent models` lists ids its sessions don't accept (D-032).
+//! `AgentInfo.agentModes` are learned the same way, where detection doesn't know them (D-035).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use burrow_agents::{AgentError, Registry};
-use burrow_protocol::{AgentId, AgentInfo, ErrorKind, ErrorObject, ModelInfo, ProviderUsage};
+use burrow_protocol::{
+    AgentId, AgentInfo, AgentMode, ErrorKind, ErrorObject, ModelInfo, ProviderUsage,
+};
 use tracing::{info, warn};
 
 /// The agents `burrowd` offers, what was last detected about them, and the usage they reported.
@@ -20,9 +23,16 @@ pub struct Agents {
     /// The last detection. `None` until the first one finishes. Held while detecting, so
     /// concurrent callers share one detection.
     detected: tokio::sync::Mutex<Option<Vec<AgentInfo>>>,
-    /// The models each agent's latest session offered, by agent id.
-    learned: Mutex<BTreeMap<String, Vec<ModelInfo>>>,
+    /// What each agent's latest session offered, by agent id.
+    learned: Mutex<BTreeMap<String, Learned>>,
     usage: Mutex<BTreeMap<String, ProviderUsage>>,
+}
+
+/// What an agent's latest session offered.
+#[derive(Debug, Default)]
+struct Learned {
+    models: Vec<ModelInfo>,
+    agent_modes: Vec<AgentMode>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -42,15 +52,29 @@ impl Agents {
 
     /// Records the models a session of `agent` offers, for `agent/list` (D-032).
     pub fn learn_models(&self, agent: &AgentId, models: Vec<ModelInfo>) {
-        lock(&self.learned).insert(agent.to_string(), models);
+        lock(&self.learned)
+            .entry(agent.to_string())
+            .or_default()
+            .models = models;
     }
 
-    /// `info` with the learned models when detection found none.
+    /// Records the agent modes a session of `agent` offers, for `agent/list` (D-035).
+    pub fn learn_agent_modes(&self, agent: &AgentId, modes: Vec<AgentMode>) {
+        lock(&self.learned)
+            .entry(agent.to_string())
+            .or_default()
+            .agent_modes = modes;
+    }
+
+    /// `info` with the learned models and modes where detection found none.
     fn with_models(&self, mut info: AgentInfo) -> AgentInfo {
-        if info.models.is_empty()
-            && let Some(models) = lock(&self.learned).get(info.id.as_str())
-        {
-            info.models.clone_from(models);
+        if let Some(learned) = lock(&self.learned).get(info.id.as_str()) {
+            if info.models.is_empty() {
+                info.models.clone_from(&learned.models);
+            }
+            if info.agent_modes.is_empty() {
+                info.agent_modes.clone_from(&learned.agent_modes);
+            }
         }
         info
     }

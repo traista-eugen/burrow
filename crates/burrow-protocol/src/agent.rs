@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::session::AgentMode;
 use crate::time::Timestamp;
 
 open_enum! {
@@ -71,6 +72,10 @@ pub struct AgentInfo {
     /// Models the agent offers, when they are cheap to find out. Empty when unknown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
+    /// The agent's own modes, what `session/create`'s `agentMode` accepts: known for Muse and
+    /// the fakes, otherwise the modes of the agent's latest session. Empty when unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_modes: Vec<AgentMode>,
     /// Whether `session/create` can start this agent now.
     pub available: bool,
     /// Why it isn't available, or what looks wrong. Human-readable.

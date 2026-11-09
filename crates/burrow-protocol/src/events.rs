@@ -14,6 +14,8 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use crate::agent::AgentId;
+use crate::inbox::InboxAction;
 use crate::open_enum::doc_text;
 use crate::session::{
     AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, LimitReached, ModelChanged,
@@ -227,6 +229,9 @@ pub struct EntityCreated {
     /// Its initial state, for entities that have one (a session or run state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The agent, for sessions, so a list entry needs no `session/get`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentId>,
 }
 
 /// `entityRenamed`: an entity's display name changed.
@@ -285,6 +290,10 @@ pub struct InboxItemAdded {
     /// Where it comes from.
     #[serde(default)]
     pub source: InboxSource,
+    /// The possible answers, as in the item, so a client can show its buttons without
+    /// `inbox/get`. Absent from older `burrowd`s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<InboxAction>>,
 }
 
 /// `inboxItemResolved`: an inbox item no longer needs an answer.

@@ -35,10 +35,12 @@ Every decision that shapes the architecture gets an entry here.
 | [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted; its inbox item left open when Muse settles an approval itself superseded by D-031 |
 | [D-027](#d-027-muse-sessions-ask-no-user-input-questions-in-m2-and-keep-their-sandbox) | Muse sessions ask no user-input questions in M2, and keep their sandbox | 2026-11-09 | accepted |
 | [D-028](#d-028-the-desktop-app-uses-gpui-component-on-the-gpui-pre-snapshot-and-gpuis-windows-manifest) | The desktop app uses gpui-component on the `gpui-pre` snapshot, and GPUI's Windows manifest | 2026-11-09 | accepted; replaces D-010 |
-| [D-029](#d-029-the-app-starts-burrowd-itself-detached-and-every-stream-resumes-after-a-reconnect) | The app starts `burrowd` itself, detached, and every stream resumes after a reconnect | 2026-11-09 | accepted |
+| [D-029](#d-029-the-app-starts-burrowd-itself-detached-and-every-stream-resumes-after-a-reconnect) | The app starts `burrowd` itself, detached, and every stream resumes after a reconnect | 2026-11-09 | accepted; its fetch per new list entry removed by D-035 |
 | [D-030](#d-030-the-desktop-app-keeps-plain-models-under-gpui-entities-and-splits-the-session-view-into-header-transcript-and-prompt) | The desktop app keeps plain models under GPUI entities, and splits the session view into header, transcript and prompt | 2026-11-09 | accepted |
 | [D-031](#d-031-muses-approval-modes-are-its-agent-modes-and-an-agent-can-withdraw-a-permission-request) | Muse's approval modes are its agent modes, and an agent can withdraw a permission request | 2026-11-09 | accepted |
 | [D-032](#d-032-models-are-named-by-the-ids-sessions-accept-and-listed-from-the-agents-latest-session) | Models are named by the ids sessions accept, and listed from the agent's latest session | 2026-11-09 | accepted |
+| [D-035](#d-035-index-events-carry-what-a-list-entry-needs-and-agentinfo-lists-agent-modes) | Index events carry what a list entry needs, and `AgentInfo` lists agent modes | 2026-11-09 | accepted; amends D-029's consequence |
+| [D-036](#d-036-the-app-measures-itself-keeps-recent-sessions-open-and-redraws-only-for-what-changed-on-screen) | The app measures itself, keeps recent sessions open, and redraws only for what changed on screen | 2026-11-09 | accepted |
 
 ---
 
@@ -719,3 +721,54 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - On a fresh install, `agent/list` shows no models for Claude Code, Codex and Cursor until each has run a session. The app's model picker reads `Session.models`, which every session has.
 - A model the agent dropped since its latest session fails `session/create` with `-32602`, naming what the session offers.
 - A name two models share finds neither; use the id.
+
+## D-035 Index events carry what a list entry needs, and `AgentInfo` lists agent modes
+
+**Decision.**
+- **Index events.** A session's `entityCreated` carries its `agent`, and `inboxItemAdded` the item's `actions`. Both are optional fields, so the change is additive (protocol version 0), and `burrowd` always sends them. A client calls `session/get` or `inbox/get` only when they are absent, from an older `burrowd`.
+- **Agent modes up front.** `AgentInfo` gains `agentModes`: the modes `session/create`'s `agentMode` accepts, with names and descriptions. They come from the same places as `models` (D-032):
+  - Muse's four approval modes are known at detection (D-031);
+  - for the ACP agents, they are the modes of the agent's latest session, learned when a session starts and from the stored rows at startup;
+  - `fake` has none.
+- **The app** builds a sidebar entry and an inbox card from the index event alone, and its new session page offers the model and the agent mode before the session exists.
+
+**Why.**
+- D-029 recorded the cost: one `session/get` per new session and one `inbox/get` per new item, a round trip and a state merge each, racing the events that follow. An agent that asks several permissions in a row produced a burst of fetches. A phone client on a slow link would pay the same.
+- An agent and a few short actions are small. The index stays a stream of summaries: a project's path, an item's `body` and `form` still come from `*/get`.
+- Choosing a mode after the session starts is too late for the modes that matter most: a session started in a mode that asks nothing can act before the user switches it. Learning modes from the latest session is free, as it is for models; a probe session at detection is not (D-032).
+
+**Alternatives considered.**
+- **Embed the whole `Session` or `InboxItem` in the index event:** the index would grow with every field added to them, and every subscriber pays for it.
+- **Keep fetching, but batch:** fewer round trips, the same merge logic, and still a moment where an inbox card has no buttons.
+- **A static table of each ACP agent's modes in Burrow:** goes stale with each agent release; the agent's own list is the truth.
+
+**Consequences.**
+- D-029's consequence that the app fetches each new session and item no longer holds for a current `burrowd`.
+- On a fresh install, the new session page shows no modes for Claude Code, Codex and Cursor until each has run a session, as for models; it says so.
+- `agent/list` grows by a few hundred bytes per agent.
+
+## D-036 The app measures itself, keeps recent sessions open, and redraws only for what changed on screen
+
+**Decision.**
+- **Measuring.** `burrow.exe --measure <file>` waits until the app is in use (connected, the lists and agents loaded, every `--open` session replayed), lets the window draw that for 1.5 s, writes one JSON object (the first frame from process creation, connected, ready, working set, private bytes, peak) and quits. `cargo xtask measure` builds the release binaries, seeds a `burrowd --dev` of its own on its own pipe and data folder (50 fake sessions, 3 of them with 100 turns), and launches the app 5 times with `burrowd` running, once with the long sessions open, and 5 times starting `burrowd` itself. It never touches the user's `burrowd`. The numbers are in plan.md.
+- **Recent sessions stay open.** The workspace keeps the views of the last 5 sessions shown, with their subscriptions and transcripts; older ones are dropped.
+- **Redraw only for what changed on screen.** GPUI redraws the window whenever a view notifies, so nothing ticks on a fixed timer:
+  - relative times ("5m") redraw when the first of them on screen would change: within the minute for recent ones, on the hour or the day for older ones, never when none shows;
+  - the limit banner's countdown ticks once a second, and only while it shows a reset ahead;
+  - the new session page ticks once a second only while an install runs.
+
+**Why.**
+- **A check anyone can repeat.** "Under 300 ms" is only a target if it is measured the same way each time. Logging the first frame was there since the spike; the flag adds what an everyday launch looks like: the lists in, and the memory with real data. Fake sessions make it repeatable and spend no quota.
+- **The numbers** (2026-11-09): the first frame comes 129 ms after process creation with `burrowd` running, and 131 ms when the app starts it, since connecting never blocks the window. The working set is 62 MB with 50 sessions listed, and 169 MB with 3 long sessions open: about 36 MB per open session of about 1,400 events. Of that, the stores, headers and prompt boxes of the three sessions take about 7 MB together (measured with the transcripts given an empty store); the rest is the current transcript view, which the transcript rebuild replaces. Startup needed no fix.
+- **Switching back should be instant.** Reopening a session replays its whole stream and rebuilds its transcript. Most work moves between two or three sessions; keeping every session ever opened would grow without bound. Five is the bound while the transcript costs about 36 MB per long session; revisit it if the rebuilt transcript costs much less, or more.
+- **Ticks cost a whole window.** A one-second tick for "5m" labels would redraw the window 3,600 times an hour to change a label once a minute at most.
+
+**Alternatives considered.**
+- **An external profiler (WPR, ETW) for startup:** precise, but not something to run after every change.
+- **A fixed 30-second tick for relative times:** labels lag by up to 30 s and the window redraws for nothing.
+- **Keeping no views:** every switch replays the stream; a long transcript takes visibly longer than a short one.
+
+**Consequences.**
+- `--open <sessionId>` exists for the measurement and for screenshots.
+- Re-run `cargo xtask measure` after changes that touch startup or the transcript, and update plan.md.
+- A session archived from this app closes its view; one archived elsewhere stays open, marked archived.

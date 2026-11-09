@@ -62,6 +62,16 @@ impl SessionView {
         &self.session_id
     }
 
+    /// Whether the session has loaded and replayed its history.
+    pub fn is_caught_up(&self, cx: &gpui::App) -> bool {
+        self.store.read(cx).is_caught_up()
+    }
+
+    /// How many events the session holds.
+    pub fn event_count(&self, cx: &gpui::App) -> usize {
+        self.store.read(cx).log().events().len()
+    }
+
     /// Focuses the prompt box.
     pub fn focus_prompt(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.prompt

@@ -4,6 +4,8 @@
 //! |---|---|---|
 //! | `--pipe <name>` | `BURROW_PIPE` | Connect to another pipe, for example a test `burrowd`'s |
 //! | `--burrowd-args "<args>"` | `BURROWD_ARGS` | Arguments for the `burrowd` the app starts |
+//! | `--open <sessionId>` | | Open this session at startup; repeat for several (the last shows) |
+//! | `--measure <file>` | | Measure startup and memory, write them to `<file>` as JSON, and exit (see [`crate::startup`]) |
 //!
 //! On the default pipe the app starts `burrowd` when it isn't running. On another pipe it starts
 //! one only when given `--burrowd-args` (it adds `--pipe`): a second `burrowd` on the default
@@ -20,6 +22,10 @@ pub struct Args {
     pub pipe: Option<String>,
     /// Extra arguments for a `burrowd` the app starts, split on whitespace.
     pub burrowd_args: Option<Vec<String>>,
+    /// Sessions to open at startup, in order.
+    pub open: Vec<String>,
+    /// Where to write startup and memory measurements, then exit.
+    pub measure: Option<std::path::PathBuf>,
     /// Arguments that weren't understood.
     pub unknown: Vec<String>,
 }
@@ -53,6 +59,14 @@ impl Args {
                 parsed.burrowd_args = Some(split(value));
             } else if arg == "--burrowd-args" {
                 parsed.burrowd_args = args.next().map(|value| split(&value));
+            } else if let Some(value) = arg.strip_prefix("--open=") {
+                parsed.open.push(value.to_owned());
+            } else if arg == "--open" {
+                parsed.open.extend(args.next());
+            } else if let Some(value) = arg.strip_prefix("--measure=") {
+                parsed.measure = Some(value.into());
+            } else if arg == "--measure" {
+                parsed.measure = args.next().map(Into::into);
             } else {
                 parsed.unknown.push(arg);
             }
@@ -121,6 +135,21 @@ mod tests {
         assert_eq!(args.burrowd_args.unwrap(), ["--dev"]);
         assert_eq!(args.unknown, ["--what"]);
         assert_eq!(parse(&[], Some("  "), None).pipe, None);
+    }
+
+    #[test]
+    fn sessions_to_open_and_measuring() {
+        let args = parse(
+            &["--open", "ses_1", "--open=ses_2", "--measure", r"D:\m.json"],
+            None,
+            None,
+        );
+        assert_eq!(args.open, ["ses_1", "ses_2"]);
+        assert_eq!(
+            args.measure.as_deref(),
+            Some(std::path::Path::new(r"D:\m.json"))
+        );
+        assert!(args.unknown.is_empty());
     }
 
     #[test]

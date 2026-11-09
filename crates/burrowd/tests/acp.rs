@@ -698,9 +698,14 @@ async fn models_are_named_by_id_or_name_and_listed_from_the_latest_session() {
     let (_daemon, client) = start(dir.path(), "acp-models").await;
     const PARAM: &str = "fake-param[context=1k,effort=high]";
 
-    // Detection can't tell an ACP agent's models; no session has run yet.
+    // Detection can't tell an ACP agent's models or modes; no session has run yet.
     let agents = client.call::<AgentList>(&Empty {}).await.unwrap();
     assert!(agents[0].models.is_empty(), "{:?}", agents[0].models);
+    assert!(
+        agents[0].agent_modes.is_empty(),
+        "{:?}",
+        agents[0].agent_modes
+    );
 
     // A parameterized model, named by its base name, as Cursor's `gpt-5.5` is.
     let mut params = create_params(dir.path());
@@ -722,6 +727,20 @@ async fn models_are_named_by_id_or_name_and_listed_from_the_latest_session() {
         .map(|model| model.id.as_str())
         .collect();
     assert_eq!(ids, ["fake-fast", "fake-smart", PARAM]);
+    // And its agent modes, with their descriptions, for picking one up front (D-035).
+    assert_eq!(agents[0].agent_modes, session.agent_modes);
+    let modes: Vec<&str> = agents[0]
+        .agent_modes
+        .iter()
+        .map(|mode| mode.id.as_str())
+        .collect();
+    assert_eq!(modes, ["auto", "ask", "plan"]);
+    assert!(
+        agents[0]
+            .agent_modes
+            .iter()
+            .all(|mode| mode.description.is_some())
+    );
     params.model = Some(PARAM.into());
     let exact = client.call::<SessionCreate>(&params).await.unwrap();
     assert_eq!(exact.model.as_deref(), Some(PARAM));

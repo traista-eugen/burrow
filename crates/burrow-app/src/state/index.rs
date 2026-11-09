@@ -1,11 +1,14 @@
 //! The lists the app shows (projects, sessions, open inbox items), as a plain model with no GPUI
 //! in it, so it can be tested on its own.
 //!
-//! The lists are loaded with `project/list`, `session/list` and `inbox/list`, then kept current
-//! from the `index` stream. Index events are summaries: a new session arrives without its agent,
-//! a new inbox item without its actions. [`IndexModel::apply`] says what to fetch to fill them in
-//! ([`Fetch`]), and the caller hands the answers back with [`IndexModel::upsert_session`] and
-//! friends.
+//! The lists are loaded with `project/list`, `session/list` (archived sessions included, for the
+//! sidebar's "show archived") and `inbox/list`, then kept current from the `index` stream.
+//!
+//! Index events are summaries. `burrowd` puts a new session's agent on its `entityCreated` and a
+//! new inbox item's actions on its `inboxItemAdded` (D-035), so a list entry is complete from
+//! the event. An older `burrowd` leaves them out, and a new project arrives without its path:
+//! [`IndexModel::apply`] then says what to fetch ([`Fetch`]), and the caller hands the answers
+//! back with [`IndexModel::upsert_session`] and friends.
 //!
 //! # Loading without losing events
 //!
@@ -18,8 +21,8 @@
 use std::collections::HashMap;
 
 use burrow_protocol::{
-    AgentId, EntityKind, Event, InboxItem, InboxItemKind, InboxItemStatus, InboxSource, Project,
-    SessionState, SessionSummary, StreamEvent, Timestamp,
+    AgentId, EntityKind, Event, InboxAction, InboxItem, InboxItemKind, InboxItemStatus,
+    InboxSource, Project, SessionState, SessionSummary, StreamEvent, Timestamp,
 };
 
 /// A project in the sidebar.
@@ -50,7 +53,8 @@ pub struct SessionEntry {
     pub id: String,
     /// The project it belongs to, if any.
     pub project_id: Option<String>,
-    /// The agent. `None` until `session/get` answers for a session that arrived on the index.
+    /// The agent. `None` only for a session that arrived on an older `burrowd`'s index, until
+    /// `session/get` answers.
     pub agent: Option<AgentId>,
     /// The model, if known.
     pub model: Option<String>,
@@ -61,6 +65,8 @@ pub struct SessionEntry {
     /// The sort key: the last time something happened. The time of the last index event about
     /// the session, or the list's `updatedAt`.
     pub activity: Option<Timestamp>,
+    /// Archived: hidden from the default lists.
+    pub archived: bool,
 }
 
 impl SessionEntry {
@@ -74,6 +80,7 @@ impl SessionEntry {
             title: summary.title,
             state: summary.state,
             activity,
+            archived: summary.archived,
         }
     }
 
@@ -105,9 +112,9 @@ pub struct InboxEntry {
     pub title: String,
     /// Where it comes from.
     pub source: InboxSource,
-    /// The whole item, with its actions. `None` until `inbox/get` answers for an item that
-    /// arrived on the index.
-    pub item: Option<InboxItem>,
+    /// Its answers. `None` only for an item that arrived on an older `burrowd`'s index, until
+    /// `inbox/get` answers.
+    pub actions: Option<Vec<InboxAction>>,
     /// When it arrived, for ordering: newest first.
     pub created: Timestamp,
 }
@@ -115,12 +122,12 @@ pub struct InboxEntry {
 impl From<InboxItem> for InboxEntry {
     fn from(item: InboxItem) -> Self {
         Self {
-            id: item.id.clone(),
-            kind: item.kind.clone(),
-            title: item.title.clone(),
-            source: item.source.clone(),
+            id: item.id,
+            kind: item.kind,
+            title: item.title,
+            source: item.source,
+            actions: Some(item.actions),
             created: item.created_at,
-            item: Some(item),
         }
     }
 }
@@ -194,7 +201,7 @@ impl IndexModel {
     }
 
     /// Replaces every list with what `*/list` returned, then applies the events that arrived
-    /// meanwhile. `inbox` should be the open items.
+    /// meanwhile. `sessions` may include archived ones; `inbox` should be the open items.
     pub fn finish_load(
         &mut self,
         projects: Vec<Project>,
@@ -204,7 +211,6 @@ impl IndexModel {
         self.projects = projects.into_iter().map(ProjectEntry::from).collect();
         self.sessions = sessions
             .into_iter()
-            .filter(|summary| !summary.archived)
             .map(|summary| (summary.id.clone(), SessionEntry::from_summary(summary)))
             .collect();
         self.inbox = inbox
@@ -273,9 +279,13 @@ impl IndexModel {
                                 title: None,
                                 state: SessionState::Starting,
                                 activity: None,
+                                archived: false,
                             });
                     if created.title.is_some() {
                         entry.title = created.title.clone();
+                    }
+                    if created.agent.is_some() {
+                        entry.agent = created.agent.clone();
                     }
                     if let Some(state) = &created.state {
                         entry.state = SessionState::from(state.as_str());
@@ -320,8 +330,15 @@ impl IndexModel {
                     self.projects.retain(|p| p.id != removed.id);
                     applied.changed = self.projects.len() != before;
                 }
+                // A session leaves the default lists when it is archived; it stays here, hidden
+                // unless archived sessions are shown.
                 EntityKind::Session => {
-                    applied.changed = self.sessions.remove(&removed.id).is_some();
+                    if let Some(session) = self.sessions.get_mut(&removed.id)
+                        && !session.archived
+                    {
+                        session.archived = true;
+                        applied.changed = true;
+                    }
                 }
                 _ => {}
             },
@@ -334,11 +351,13 @@ impl IndexModel {
                             kind: added.kind.clone(),
                             title: added.title.clone(),
                             source: added.source.clone(),
-                            item: None,
+                            actions: added.actions.clone(),
                             created: at,
                         },
                     );
-                    applied.fetch.push(Fetch::InboxItem(added.item_id.clone()));
+                    if added.actions.is_none() {
+                        applied.fetch.push(Fetch::InboxItem(added.item_id.clone()));
+                    }
                     applied.changed = true;
                 }
             }
@@ -375,6 +394,7 @@ impl IndexModel {
         entry.agent = Some(summary.agent);
         entry.model = summary.model;
         entry.project_id = summary.project_id;
+        entry.archived |= summary.archived;
         if summary.title.is_some() {
             entry.title = summary.title;
         }
@@ -415,12 +435,17 @@ impl IndexModel {
         self.sessions.get(session_id)
     }
 
-    /// The sessions of a project, most recent activity first. `None` gives the sessions that
-    /// have no project, or whose project isn't listed.
-    pub fn sessions_of(&self, project_id: Option<&str>) -> Vec<&SessionEntry> {
+    /// The sessions of a project, most recent activity first, archived ones only if asked.
+    /// `None` gives the sessions that have no project, or whose project isn't listed.
+    pub fn sessions_of(
+        &self,
+        project_id: Option<&str>,
+        include_archived: bool,
+    ) -> Vec<&SessionEntry> {
         let mut sessions: Vec<&SessionEntry> = self
             .sessions
             .values()
+            .filter(|session| include_archived || !session.archived)
             .filter(|session| match project_id {
                 Some(id) => session.project_id.as_deref() == Some(id),
                 None => session
@@ -433,11 +458,20 @@ impl IndexModel {
         sessions
     }
 
-    /// Every listed session, most recent activity first.
-    pub fn sessions(&self) -> Vec<&SessionEntry> {
-        let mut sessions: Vec<&SessionEntry> = self.sessions.values().collect();
+    /// Every session, most recent activity first, archived ones only if asked.
+    pub fn sessions(&self, include_archived: bool) -> Vec<&SessionEntry> {
+        let mut sessions: Vec<&SessionEntry> = self
+            .sessions
+            .values()
+            .filter(|session| include_archived || !session.archived)
+            .collect();
         sort_by_activity(&mut sessions);
         sessions
+    }
+
+    /// How many sessions are archived.
+    pub fn archived_count(&self) -> usize {
+        self.sessions.values().filter(|s| s.archived).count()
     }
 
     /// Open inbox items, newest first.
@@ -553,6 +587,8 @@ mod tests {
             title: None,
             project_id: project.map(Into::into),
             state: Some("starting".into()),
+            // As an older burrowd sends it.
+            agent: None,
         }
     }
 
@@ -585,18 +621,18 @@ mod tests {
         let model = loaded();
         assert!(model.is_loaded());
         let alpha: Vec<_> = model
-            .sessions_of(Some("prj_a"))
+            .sessions_of(Some("prj_a"), false)
             .iter()
             .map(|s| s.id.clone())
             .collect();
         assert_eq!(alpha, ["ses_2", "ses_1"]);
         let loose: Vec<_> = model
-            .sessions_of(None)
+            .sessions_of(None, false)
             .iter()
             .map(|s| s.id.clone())
             .collect();
         assert_eq!(loose, ["ses_3"]);
-        assert!(model.sessions_of(Some("prj_b")).is_empty());
+        assert!(model.sessions_of(Some("prj_b"), false).is_empty());
         assert_eq!(model.inbox_count(), 1);
         assert_eq!(model.inbox_of_session("ses_1").len(), 1);
     }
@@ -624,7 +660,7 @@ mod tests {
         assert_eq!(session.state, SessionState::Working);
         assert_eq!(session.display_title(), "New session");
         // The newest activity sorts first.
-        assert_eq!(model.sessions()[0].id, "ses_9");
+        assert_eq!(model.sessions(false)[0].id, "ses_9");
         assert_eq!(model.seq(), 12);
     }
 
@@ -644,14 +680,26 @@ mod tests {
             "Fix the typo"
         );
 
-        model.apply(&event(
+        // Archiving hides the session from the default lists; it stays, for "show archived".
+        let applied = model.apply(&event(
             21,
             EntityRemoved {
                 entity: EntityKind::Session,
                 id: "ses_1".into(),
             },
         ));
-        assert!(model.session("ses_1").is_none());
+        assert!(applied.changed);
+        assert!(model.session("ses_1").unwrap().archived);
+        assert_eq!(model.archived_count(), 1);
+        let shown = |model: &IndexModel, archived| -> Vec<String> {
+            model
+                .sessions_of(Some("prj_a"), archived)
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        assert_eq!(shown(&model, false), ["ses_2"]);
+        assert_eq!(shown(&model, true), ["ses_2", "ses_1"]);
 
         // Removing a project moves its sessions to "no project".
         model.apply(&event(
@@ -663,7 +711,7 @@ mod tests {
         ));
         assert_eq!(model.projects().len(), 1);
         let loose: Vec<_> = model
-            .sessions_of(None)
+            .sessions_of(None, false)
             .iter()
             .map(|s| s.id.clone())
             .collect();
@@ -683,13 +731,15 @@ mod tests {
                     session_id: Some("ses_3".into()),
                     ..Default::default()
                 },
+                // As an older burrowd sends it.
+                actions: None,
             },
         ));
         assert_eq!(applied.fetch, [Fetch::InboxItem("inb_2".into())]);
         assert_eq!(model.inbox()[0].id, "inb_2");
-        assert!(model.inbox()[0].item.is_none());
+        assert!(model.inbox()[0].actions.is_none());
         assert!(model.upsert_inbox_item(inbox_item("inb_2", "ses_3", InboxItemStatus::Open)));
-        assert!(model.inbox_of_session("ses_3")[0].item.is_some());
+        assert!(model.inbox_of_session("ses_3")[0].actions.is_some());
 
         model.apply(&event(
             31,
@@ -719,7 +769,7 @@ mod tests {
         );
         model.apply(&event(6, state_changed("ses_1", "idle")));
         model.apply(&event(7, state_changed("ses_1", "working")));
-        assert!(model.sessions().is_empty());
+        assert!(model.sessions(true).is_empty());
 
         let applied = model.finish_load(
             vec![project("prj_a", "alpha")],
@@ -741,7 +791,7 @@ mod tests {
         // After a `reset` subscription, the caller reloads: entries burrowd no longer has go.
         model.begin_load();
         model.finish_load(vec![project("prj_a", "alpha")], Vec::new(), Vec::new());
-        assert!(model.sessions().is_empty());
+        assert!(model.sessions(true).is_empty());
         assert_eq!(model.inbox_count(), 0);
         assert_eq!(model.projects().len(), 1);
     }
@@ -757,9 +807,77 @@ mod tests {
             title: None,
             project_id: None,
             state: Some("queued".into()),
+            agent: None,
         };
         assert!(!model.apply(&event(51, run)).changed);
         assert_eq!(model.seq(), 51);
+    }
+
+    #[test]
+    fn complete_index_events_need_no_fetch() {
+        let mut model = loaded();
+        let mut created = session_created("ses_9", Some("prj_b"));
+        created.agent = Some(AgentId::Claude);
+        let applied = model.apply(&event(60, created));
+        assert!(applied.changed);
+        assert!(applied.fetch.is_empty());
+        assert_eq!(model.session("ses_9").unwrap().agent, Some(AgentId::Claude));
+
+        let actions = vec![
+            InboxAction {
+                id: "allow".into(),
+                label: "Allow".into(),
+                style: Some(burrow_protocol::InboxActionStyle::Primary),
+            },
+            InboxAction {
+                id: "reject".into(),
+                label: "Reject".into(),
+                style: Some(burrow_protocol::InboxActionStyle::Danger),
+            },
+        ];
+        let applied = model.apply(&event(
+            61,
+            InboxItemAdded {
+                item_id: "inb_9".into(),
+                kind: InboxItemKind::Permission,
+                title: "Run cargo test".into(),
+                source: InboxSource {
+                    session_id: Some("ses_9".into()),
+                    tool_call_id: Some("call_1".into()),
+                    ..Default::default()
+                },
+                actions: Some(actions.clone()),
+            },
+        ));
+        assert!(applied.changed);
+        assert!(applied.fetch.is_empty());
+        let entry = &model.inbox_of_session("ses_9")[0];
+        assert_eq!(entry.actions.as_deref(), Some(actions.as_slice()));
+        assert_eq!(entry.created, at(61_000));
+    }
+
+    #[test]
+    fn archived_sessions_load_hidden() {
+        let mut model = IndexModel::new();
+        model.begin_load();
+        let mut old = summary("ses_old", Some("prj_a"), SessionState::Stopped, 1);
+        old.archived = true;
+        model.finish_load(
+            vec![project("prj_a", "alpha")],
+            vec![
+                old,
+                summary("ses_new", Some("prj_a"), SessionState::Idle, 2),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(model.sessions(false).len(), 1);
+        assert_eq!(model.sessions(true).len(), 2);
+        assert_eq!(model.archived_count(), 1);
+        // A late session/get answer doesn't bring an archived session back.
+        let mut answer = summary("ses_old", Some("prj_a"), SessionState::Stopped, 1);
+        answer.archived = false;
+        model.upsert_session(answer);
+        assert!(model.session("ses_old").unwrap().archived);
     }
 
     fn serde_json_event(json: &str) -> Event {

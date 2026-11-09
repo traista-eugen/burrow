@@ -106,6 +106,7 @@ impl AgentAdapter for FakeAdapter {
                         name: None,
                     })
                     .collect(),
+                agent_modes: Vec::new(),
                 available: installed,
                 problem: (!installed).then(|| format!("{} doesn't exist", self.program.display())),
                 adapter: None,

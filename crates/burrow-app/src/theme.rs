@@ -121,6 +121,20 @@ pub fn state_color(state: &SessionState, cx: &App) -> Hsla {
     }
 }
 
+/// One sentence on what a session state means, for tooltips.
+pub fn state_description(state: &SessionState) -> &'static str {
+    match state {
+        SessionState::Starting => "The agent is starting.",
+        SessionState::Idle => "Ready for a prompt.",
+        SessionState::Working => "The agent is working on a turn.",
+        SessionState::Waiting => "The agent waits for your answer to a permission request.",
+        SessionState::Limited => "A provider's usage limit was hit; prompts wait for the reset.",
+        SessionState::Stopped => "The agent process has ended.",
+        SessionState::Failed => "The agent process exited unexpectedly.",
+        SessionState::Other(_) => "A state this version of Burrow doesn't know.",
+    }
+}
+
 /// A short label for a session state.
 pub fn state_label(state: &SessionState) -> String {
     match state {

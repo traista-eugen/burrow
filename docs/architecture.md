@@ -87,7 +87,7 @@ Flags:
 
 ### Clients
 
-- **Desktop app**: `burrow.exe`, built with GPUI and gpui-component (D-028). This is the main UI. It starts `burrowd` when nothing serves the pipe and resumes its streams after reconnecting (D-029); `crates/burrow-app/src/views/mod.rs` describes its layout.
+- **Desktop app**: `burrow.exe`, built with GPUI and gpui-component (D-028). This is the main UI. It starts `burrowd` when nothing serves the pipe and resumes its streams after reconnecting (D-029); its lists come from the `index` alone (D-035); `crates/burrow-app/src/views/mod.rs` describes its layout. `burrow.exe --measure <file>` and `cargo xtask measure` measure its startup and memory (D-036).
 - **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list|install`, `usage`, `session new|list|prompt|watch|cancel|model|mode|rename|stop|archive`, `inbox list|respond`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`.
 - **Phone app**: for remote control. The technology isn't decided yet ([plan.md](plan.md#open-decisions)).
 
@@ -272,9 +272,9 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 | Crate | Kind | Purpose | Status |
 |---|---|---|---|
-| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; M3's `session/rename` and `lastActivityAt`; schema export |
-| `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel`. M3: titles and renaming, activity on the index and lists sorted by it, withdrawn permission requests, models learned from sessions |
-| `burrow-app` | bin `burrow` | GPUI desktop client, on gpui-component (D-028) | M3 shell: connects and starts `burrowd` (D-029); sidebar, inbox panel, new session page, basic session view; state and views split as in D-030 |
+| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; M3's `session/rename`, `lastActivityAt`, the agent and actions on index events, and `AgentInfo.agentModes`; schema export |
+| `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel`. M3: titles and renaming, activity on the index and lists sorted by it, withdrawn permission requests, models and agent modes learned from sessions, complete index events (D-035) |
+| `burrow-app` | bin `burrow` | GPUI desktop client, on gpui-component (D-028) | M3 shell: connects and starts `burrowd` (D-029); state and views split as in D-030. Session controls: the header's model and agent mode pickers, state, usage, limit countdown, stop, archive, rename and folder; the prompt box with history; the new session page with model, mode and adapter installs; the sidebar's context menu and archived sessions. `--measure` (D-036) |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | Connect (checking the pipe's server is the current user), handshake, typed and cancellable calls, notifications, resumable subscriptions; runs on any executor (D-016) |
 | `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session`, `inbox`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, entity rows committed with events (D-017), migrations | implemented |
@@ -284,7 +284,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | done; wrapped by `burrow_agents::msp` |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |
-| `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json`; `cargo xtask icons` renders `assets/icon/*.svg` into the Windows `.ico` files | `schema`, `icons` |
+| `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json`; `cargo xtask icons` renders `assets/icon/*.svg` into the Windows `.ico` files; `cargo xtask measure` measures the release app's startup and memory against a seeded `burrowd` of its own | `schema`, `icons`, `measure` |
 
 The split of planned crates may change while building. This table must stay current.
 
