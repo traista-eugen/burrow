@@ -35,7 +35,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-026](#d-026-the-muse-adapter-one-muse-serve-per-session-mapped-onto-burrows-session-events) | The Muse adapter: one `muse serve` per session, mapped onto Burrow's session events | 2026-11-09 | accepted; its inbox item left open when Muse settles an approval itself superseded by D-031 |
 | [D-027](#d-027-muse-sessions-ask-no-user-input-questions-in-m2-and-keep-their-sandbox) | Muse sessions ask no user-input questions in M2, and keep their sandbox | 2026-11-09 | accepted |
 | [D-028](#d-028-the-desktop-app-uses-gpui-component-on-the-gpui-pre-snapshot-and-gpuis-windows-manifest) | The desktop app uses gpui-component on the `gpui-pre` snapshot, and GPUI's Windows manifest | 2026-11-09 | accepted; replaces D-010 |
-| [D-029](#d-029-the-app-starts-burrowd-itself-detached-and-every-stream-resumes-after-a-reconnect) | The app starts `burrowd` itself, detached, and every stream resumes after a reconnect | 2026-11-09 | accepted; its fetch per new list entry removed by D-035 |
+| [D-029](#d-029-the-app-starts-burrowd-itself-detached-and-every-stream-resumes-after-a-reconnect) | The app starts `burrowd` itself, detached, and every stream resumes after a reconnect | 2026-11-09 | accepted; its fetch per new list entry removed by D-035, its launch amended by D-037 |
 | [D-030](#d-030-the-desktop-app-keeps-plain-models-under-gpui-entities-and-splits-the-session-view-into-header-transcript-and-prompt) | The desktop app keeps plain models under GPUI entities, and splits the session view into header, transcript and prompt | 2026-11-09 | accepted |
 | [D-031](#d-031-muses-approval-modes-are-its-agent-modes-and-an-agent-can-withdraw-a-permission-request) | Muse's approval modes are its agent modes, and an agent can withdraw a permission request | 2026-11-09 | accepted |
 | [D-032](#d-032-models-are-named-by-the-ids-sessions-accept-and-listed-from-the-agents-latest-session) | Models are named by the ids sessions accept, and listed from the agent's latest session | 2026-11-09 | accepted |
@@ -43,6 +43,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-034](#d-034-tool-call-diffs-are-drawn-as-unified-diffs-from-either-shape-agents-send-with-line-numbers-only-where-they-are-known) | Tool call diffs are drawn as unified diffs from either shape agents send, with line numbers only where they are known | 2026-11-09 | accepted |
 | [D-035](#d-035-index-events-carry-what-a-list-entry-needs-and-agentinfo-lists-agent-modes) | Index events carry what a list entry needs, and `AgentInfo` lists agent modes | 2026-11-09 | accepted; amends D-029's consequence |
 | [D-036](#d-036-the-app-measures-itself-keeps-recent-sessions-open-and-redraws-only-for-what-changed-on-screen) | The app measures itself, keeps recent sessions open, and redraws only for what changed on screen | 2026-11-09 | accepted |
+| [D-037](#d-037-the-app-starts-burrowd-under-the-desktop-shell-out-of-its-own-process-tree) | The app starts `burrowd` under the desktop shell, out of its own process tree | 2026-11-09 | accepted; amends D-029's launch |
 
 ---
 
@@ -852,3 +853,26 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - `--open <sessionId>` exists for the measurement and for screenshots.
 - Re-run `cargo xtask measure` after changes that touch startup or the transcript, and update plan.md.
 - A session archived from this app closes its view; one archived elsewhere stays open, marked archived.
+
+## D-037 The app starts `burrowd` under the desktop shell, out of its own process tree
+
+**Decision.** When the app starts `burrowd` (D-029), it makes the desktop shell, Explorer, `burrowd`'s parent, with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. The other D-029 settings stay: no console, its own process group, no inherited handles. Then, in order:
+- **No shell** (no shell window, or it can't be opened, for example when the app runs as another user): it starts `burrowd` as its own child, out of its Job Object with `CREATE_BREAKAWAY_FROM_JOB`.
+- **That job forbids breaking away too:** `burrowd` starts inside it, with a warning.
+
+This amends D-029's launch, which tried only the last two.
+
+**Why.**
+- **Found on 2026-11-09.** With the app started from a terminal tab, closing the tab also ended `burrowd`, even though `burrowd` had broken away from the tab's job: the app's log showed no refusal, and its parent was the app. That terminal ends the whole process tree under the tab's shell, not just its job. A process can't leave its parent's tree on its own; only being created under another parent does that.
+- **A process created with another parent** is in that parent's tree, and inherits that parent's job and token instead of the creator's. Explorer is the user's own long-lived process: same user, normal integrity, in no job. That's the right home for a per-user service (D-002).
+- **The token.** It comes from Explorer, so `burrowd` and its agents never run elevated, even if the app does.
+
+**Alternatives considered.**
+- **Breaking away only (D-029):** survives a closing job, not a tree kill.
+- **A scheduled task, or WMI's `Win32_Process.Create`:** both start processes outside the app's tree. But a task is persistent configuration to install and clean up. WMI starts processes from a service host and is often blocked or watched.
+- **`explorer.exe <path>`:** works by accident of how Explorer hands a request to its running instance, and can't pass `burrowd` its arguments.
+
+**Consequences.**
+- `burrowd`'s parent is Explorer, so Task Manager shows it under Explorer, not under Burrow.
+- `burrowd` gets the app's environment, as before. A `burrowd` started from a terminal sees that terminal's variables, such as `BURROW_MUSE_DISABLE_SANDBOX`.
+- `crates/burrow-app/src/backend/daemon.rs` tests that a process started this way is the shell's child and shares the shell's job membership. It was checked by hand by launching the app from a terminal tab, closing the tab, and finding `burrowd` still serving its pipe.
