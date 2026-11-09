@@ -39,7 +39,9 @@ async fn stopping_kills_the_whole_tree() {
     let parent = process.pid();
     let child = first_child(parent).await;
     assert!(is_running(parent) && is_running(child));
-    assert_eq!(handle.active_processes(), 2);
+    // cmd.exe and ping, plus cmd.exe's hidden conhost.exe once Windows has started it (D-018).
+    let active = handle.active_processes();
+    assert!((2..=3).contains(&active), "{active} processes in the job");
 
     handle.stop(Duration::ZERO).await;
     assert!(!is_running(parent), "cmd.exe survived");
