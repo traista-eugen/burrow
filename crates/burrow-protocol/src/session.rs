@@ -121,6 +121,13 @@ pub struct Session {
     /// Models the agent offers in this session, when it says.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
+    /// The agent's own mode, for example Claude Code's `default` or Codex's `read-only`. It
+    /// decides what the agent asks permission for. Absent when the agent has no modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<String>,
+    /// The modes `session/setAgentMode` accepts, when the agent has modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_modes: Vec<AgentMode>,
     /// Tokens and cost so far, when the agent reports them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
@@ -134,6 +141,20 @@ pub struct Session {
     pub created_at: Timestamp,
     /// When its state, title, model or usage last changed.
     pub updated_at: Timestamp,
+}
+
+/// One of an agent's own modes, such as "ask before edits" or "plan only".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMode {
+    /// The id to pass as `agentMode`, for example `read-only`.
+    pub id: String,
+    /// A display name, for example `Read Only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What the mode does, as the agent describes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A session's totals so far.
@@ -242,6 +263,10 @@ pub struct SessionCreateParams {
     /// Structured (the default) or terminal. Terminal sessions are `unavailable` until M4.
     #[serde(default)]
     pub mode: SessionMode,
+    /// The agent's own mode to start in, for example `read-only`. When absent, the agent's
+    /// `defaultAgentMode` from `agent/list`, or else the agent's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<String>,
     /// The folder the agent works in, as an absolute path. Required without `projectId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -284,6 +309,16 @@ pub struct SessionSetModelParams {
     pub session_id: String,
     /// The model's id, as the agent knows it.
     pub model: String,
+}
+
+/// `session/setAgentMode` params.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetAgentModeParams {
+    /// The session.
+    pub session_id: String,
+    /// The mode's id, one of `Session.agentModes`.
+    pub agent_mode: String,
 }
 
 // ---- Session events ----------------------------------------------------------------------------
@@ -338,6 +373,8 @@ open_enum! {
         Think = "think",
         /// Fetches from the network.
         Fetch = "fetch",
+        /// Switches the agent's mode, for example out of planning.
+        SwitchMode = "switchMode",
         /// Anything else. (Named `Misc` in Rust because `Other` holds unknown values.)
         Misc = "other",
     }
@@ -629,6 +666,15 @@ pub struct StateChanged {
 pub struct ModelChanged {
     /// The model's id.
     pub model: String,
+}
+
+/// `agentModeChanged`: the agent now runs in another of its modes, because
+/// `session/setAgentMode` asked or the agent switched by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModeChanged {
+    /// The mode's id.
+    pub agent_mode: String,
 }
 
 /// `terminalOpened`: a terminal belongs to this session (M4).

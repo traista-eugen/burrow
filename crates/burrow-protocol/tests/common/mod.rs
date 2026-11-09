@@ -61,13 +61,25 @@ pub fn samples() -> Vec<Sample> {
             json!({"id": "claude", "name": "Claude Code", "integration": "acp", "installed": true,
                    "version": "2.1.319 (Claude Code)", "path": "C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd",
                    "login": {"state": "loggedIn", "account": "me@example.com", "detail": "claude.ai (max)"},
-                   "available": false, "problem": "the ACP adapter isn't built yet", "detectedAt": AT}),
+                   "available": false, "problem": "its ACP adapter isn't installed",
+                   "adapter": {"package": "@agentclientprotocol/claude-agent-acp", "version": "0.101.0", "installed": false,
+                               "path": "C:\\Users\\me\\AppData\\Local\\Burrow\\agents\\claude-agent-acp\\0.101.0"},
+                   "defaultAgentMode": "default", "detectedAt": AT}),
             json!({"id": "cursor", "name": "Cursor", "integration": "acp", "installed": true,
                    "login": {"state": "loggedIn"}, "models": [{"id": "auto", "name": "Auto"}, {"id": "gpt-5.2"}],
                    "available": true, "detectedAt": AT}),
             json!({"id": "muse", "name": "Muse Code", "integration": "msp", "installed": false,
                    "login": {"state": "unknown"}, "available": false, "problem": "muse isn't on PATH", "detectedAt": AT}),
         ],
+        "AdapterInfo": AdapterInfo => [
+            json!({"package": "@agentclientprotocol/codex-acp", "version": "2.6.0", "installed": true}),
+        ],
+        "AgentInstallParams": AgentInstallParams => [json!({"agent": "codex"})],
+        "AgentMode": AgentMode => [
+            json!({"id": "read-only", "name": "Read Only", "description": "Asks before edits and commands"}),
+            json!({"id": "plan"}),
+        ],
+        "AgentModeChanged": Event => [json!({"type": "agentModeChanged", "agentMode": "plan"})],
         "AgentLogin": AgentLogin => [
             json!({"state": "loggedOut"}),
             json!({"state": "loggedIn", "detail": "No subscription allowance (no_allowance)"}),
@@ -161,7 +173,8 @@ pub fn samples() -> Vec<Sample> {
         "Session": Session => [
             json!({"id": "ses_1", "projectId": "prj_1", "agent": "claude", "model": "opus", "mode": "structured",
                    "cwd": "D:\\Repos\\burrow", "title": "Fix the login bug", "state": "working", "turnId": "trn_1",
-                   "models": [{"id": "opus"}, {"id": "sonnet"}],
+                   "models": [{"id": "opus"}, {"id": "sonnet"}], "agentMode": "default",
+                   "agentModes": [{"id": "default", "name": "Default"}, {"id": "plan", "name": "Plan Mode"}],
                    "usage": {"inputTokens": 1200, "outputTokens": 300, "costUsd": 0.25},
                    "createdAt": AT, "updatedAt": AT}),
             json!({"id": "ses_2", "agent": "fake", "mode": "structured", "cwd": "C:\\", "state": "limited",
@@ -173,6 +186,7 @@ pub fn samples() -> Vec<Sample> {
         "SessionCreateParams": SessionCreateParams => [
             json!({"projectId": "prj_1", "agent": "claude", "model": "opus", "mode": "structured", "title": "Fix it"}),
             json!({"agent": "fake", "mode": "terminal", "cwd": "D:\\tmp"}),
+            json!({"agent": "codex", "mode": "structured", "agentMode": "read-only", "cwd": "D:\\tmp"}),
         ],
         "SessionIdParams": SessionIdParams => [json!({"sessionId": "ses_1"})],
         "SessionListParams": SessionListParams => [
@@ -184,6 +198,7 @@ pub fn samples() -> Vec<Sample> {
             json!({"sessionId": "ses_1", "content": [{"type": "text", "text": "Fix the login bug"}]}),
         ],
         "SessionPromptResult": SessionPromptResult => [json!({"turnId": "trn_1"})],
+        "SessionSetAgentModeParams": SessionSetAgentModeParams => [json!({"sessionId": "ses_1", "agentMode": "plan"})],
         "SessionSetModelParams": SessionSetModelParams => [json!({"sessionId": "ses_1", "model": "sonnet"})],
         "SessionState": SessionState => [
             json!("starting"), json!("idle"), json!("working"), json!("waiting"), json!("limited"),

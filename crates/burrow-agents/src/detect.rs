@@ -114,6 +114,8 @@ pub async fn detect(agent: &CliAgent) -> AgentInfo {
         models: Vec::new(),
         available: false,
         problem: None,
+        adapter: None,
+        default_agent_mode: None,
         detected_at: Timestamp::now(),
     };
     let Some(program) = agent.find() else {

@@ -6,7 +6,7 @@
 >
 > **Implemented so far:**
 > - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
-> - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
+> - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `agent/install`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
 >
 > `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
@@ -266,6 +266,7 @@ Settled in M2:
 |---|---|
 | `agent/list` | → `AgentInfo[]`: the agents `burrowd` offers, as last detected |
 | `agent/refresh` | → `AgentInfo[]`. Detects again, for example after you install something or log in. |
+| `agent/install` | `{agent}` → `AgentInfo`. Installs the pinned ACP adapter the agent runs through, then detects it again. |
 | `usage/get` | → `ProviderUsage[]`: each provider's usage and limit, as last reported |
 | `settings/get`, `settings/update` | Global settings, including the default candidate list for each role. **Not implemented yet.** |
 
@@ -279,7 +280,15 @@ type AgentInfo = {
   models?: { id: string; name?: string }[];  // when cheap to find out
   available: boolean;                        // session/create can start it now
   problem?: string;                          // why not, or what looks wrong
+  adapter?: AdapterInfo;                     // the npm ACP adapter Burrow runs it through, if any
+  defaultAgentMode?: string;                 // the agent mode sessions start in, e.g. "default"
   detectedAt: string;
+};
+type AdapterInfo = {
+  package: string;             // "@agentclientprotocol/claude-agent-acp"
+  version: string;             // the pinned version, "0.101.0"
+  installed: boolean;
+  path?: string;               // where it is, or will be, installed
 };
 type ProviderUsage = {
   provider: string;            // by default the reporting agent's id
@@ -294,10 +303,17 @@ type RoleConfig = { role: string; candidates: Candidate[]; waitIfResetWithinMinu
 ```
 
 How detection works (M2):
-- **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota.
+- **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota, and `fake-acp`, a scripted agent that speaks ACP and runs through the same adapter as Claude Code, Codex and Cursor.
 - **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout.
 - **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
-- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. Until M2's ACP and MSP adapters land, that includes all four real agents.
+- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. For Claude Code and Codex it is also false while their ACP adapter (`adapter`) isn't installed, or Node.js isn't on `PATH`, and `problem` names the `burrowctl agent install` command. Until the MSP adapter lands, Muse is never available.
+- **`defaultAgentMode`** is the [agent mode](#sessions) a session starts in when `session/create` names none: `default` for Claude Code and `read-only` for Codex, both of which ask before edits and commands. Cursor has none and keeps its own default, `agent`, which asks before shell commands but never before file edits (D-024).
+
+`agent/install` (D-024):
+- **What it installs:** the pinned npm adapter of Claude Code (`@agentclientprotocol/claude-agent-acp` 0.101.0) or Codex (`@agentclientprotocol/codex-acp` 2.6.0), into `%LOCALAPPDATA%\Burrow\agents\<adapter>\<version>` (`burrowd --agents-dir` changes the folder). It takes a few seconds and 400–500 MB, and needs Node.js 22 or later, whose npm it runs. Nothing is ever installed implicitly.
+- **The answer** is the agent's `AgentInfo`, detected again, once the install is done. Installing what is installed answers at once; two installs of one agent run one after the other.
+- **Errors:** an agent with nothing to install (Cursor, Muse, the fakes) is `invalidState`. An agent `burrowd` doesn't offer, or a missing npm, is `unavailable`. An npm failure is `-32603`, with npm's last lines in the message.
+- **`$/cancel`** kills npm and answers `cancelled`. npm works in a staging folder that is moved into place only when it succeeded, so a cancelled or failed install never looks installed.
 - **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. It is kept in memory only, and is empty again after a restart.
 
 ### Sessions
@@ -309,11 +325,12 @@ A session is one conversation with one agent. It is one of two kinds:
 | Method | Params → Result |
 |---|---|
 | `session/list` | `{projectId?, state?, includeArchived?, limit?, before?}` → `SessionSummary[]`, newest first |
-| `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", cwd?, title?}` → `Session`, once the agent is ready |
+| `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", agentMode?, cwd?, title?}` → `Session`, once the agent is ready |
 | `session/get` | `{sessionId}` → `Session` |
 | `session/prompt` | `{sessionId, content: ContentBlock[]}` → `{turnId}`. The output arrives as events. |
 | `session/cancel` | `{sessionId}` → `{}`. Stops the current turn; the session stays open. |
 | `session/setModel` | `{sessionId, model}` → `{}` |
+| `session/setAgentMode` | `{sessionId, agentMode}` → `{}`. Switches the agent's own mode, one of `agentModes`. |
 | `session/stop` | `{sessionId}` → `{}`. Ends the agent process and everything it started. |
 | `session/archive` | `{sessionId}` → `{}`. Stops the session if needed and hides it from default lists. |
 
@@ -325,6 +342,8 @@ type Session = {
   reason?: string;            // why it stopped or failed
   turnId?: string;            // the running turn, while working or waiting
   models?: { id: string; name?: string }[];   // what setModel accepts, when the agent says
+  agentMode?: string;         // the agent's own mode, e.g. "read-only"; absent when it has none
+  agentModes?: { id: string; name?: string; description?: string }[];   // what setAgentMode accepts
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };  // totals
   limit?: { provider: string; resetsAt?: string; message: string };       // while limited
   archived?: boolean;
@@ -360,10 +379,15 @@ ACP embeds image data directly. Burrow passes artifact references instead, and t
 Settled in M2:
 - **`session/create`** answers once the agent is ready (`idle`), which can take seconds for an npm-based agent. Clients that want to show progress follow the `index`: the session appears there as `starting` straight away.
   - `cwd` defaults to the project's folder. Without a `projectId`, `cwd` is required. It must be an existing folder (`-32602`).
-  - `mode: "terminal"` is `unavailable` until M4. An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable` too; a failed start leaves the session `failed`.
+  - `mode: "terminal"` is `unavailable` until M4. An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable` too, and so is Claude Code or Codex before `agent/install`; a failed start leaves the session `failed`.
+  - `model` must be one the agent offers, else `-32602`, and the session ends `failed`.
+- **Agent modes** (D-024) are the agent's own, for example Claude Code's `default`, `acceptEdits`, `plan`, `auto` and `bypassPermissions`, or Codex's `read-only`, `workspace-write`, `agent` and `agent-full-access`. They decide what the agent asks permission for. `mode` was taken: it says structured or terminal.
+  - A session starts in `agentMode` when `session/create` gives one, else in the agent's `defaultAgentMode`, else in the agent's own default. A mode the agent doesn't offer is `-32602`, and the session ends `failed`.
+  - `session/setAgentMode` switches later; an unknown mode is `-32602`. Every change is recorded with `agentModeChanged`, including the ones the agent makes by itself, such as Claude Code leaving `plan` mode.
+  - Agents without modes have no `agentMode`; `session/setAgentMode` on them is `-32602`.
 - **`session/prompt`** starts a turn and answers with its id. Only one turn runs at a time: prompting while one runs is `invalidState`, and so is prompting a `stopped` or `failed` session. Prompting a `limited` session whose `resetsAt` is still ahead is `limitReached` (-32005) with `data.resetsAt`; without a known reset time the prompt is tried.
 - **Titles.** A session created without a `title` takes the first line of its first prompt, cut to 60 characters, and announces it with `entityRenamed`.
-- **`session/cancel`** asks the agent to stop the turn, and expires its open permission requests at once. The turn still ends with `turnEnded` (`cancelled`). With no turn running it does nothing.
+- **`session/cancel`** asks the agent to stop the turn, and expires its open permission requests at once. The turn still ends with `turnEnded` (`cancelled`). With no turn running it does nothing. An ACP agent that hasn't ended the turn 10 seconds later gets its turn ended for it, `cancelled` with a `message` saying so, and is restarted into the same conversation; prompts wait for the restart (D-025).
 - **`session/setModel`** asks the agent to switch; once it agrees, `modelChanged` follows.
 - **`session/stop`** answers once the agent's whole process tree is gone (D-018). A running turn ends with `turnEnded` (`cancelled`), open permission requests expire, and the session is `stopped` with reason `stopped by request`. Stopping a stopped session does nothing.
 - **`session/archive`** stops the session if needed, sets `archived`, and puts `entityRemoved` on the index. `session/list` leaves archived sessions out unless `includeArchived` is set.
@@ -389,9 +413,10 @@ Session event types deliberately mirror ACP's `session/update` kinds, so the ACP
 | `limitReached` | `provider, resetsAt?, message` |
 | `stateChanged` | `state, reason?` (why it stopped or failed) |
 | `modelChanged` | `model` |
+| `agentModeChanged` | `agentMode` |
 | `terminalOpened` | `terminalId` (M4) |
 
-- **Values mirror ACP, in camelCase.** `kind` of a tool call is `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch` or `other`; `status` is `pending`, `inProgress`, `completed` or `failed`; a plan entry's `status` is `pending`, `inProgress` or `completed` and its `priority` `high`, `medium` or `low`; a permission option's `kind` is `allowOnce`, `allowAlways`, `rejectOnce` or `rejectAlways`. All of these, and `turnEnded`'s `reason`, are open enums.
+- **Values mirror ACP, in camelCase.** `kind` of a tool call is `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switchMode` or `other`; `status` is `pending`, `inProgress`, `completed` or `failed`; a plan entry's `status` is `pending`, `inProgress` or `completed` and its `priority` `high`, `medium` or `low`; a permission option's `kind` is `allowOnce`, `allowAlways`, `rejectOnce` or `rejectAlways`. All of these, and `turnEnded`'s `reason`, are open enums.
 - **Tool call content** is `{type: "content", content: ContentBlock}`, `{type: "diff", path, oldText?, newText}` or `{type: "terminal", terminalId}`.
 - **Turns.** Every event of a turn comes after its `userMessage` and before its `turnEnded`. Agent text outside a turn is dropped.
 - **Text is stored in chunks of about 100 ms.** `burrowd` buffers a turn's message or thought text and commits it when 100 ms have passed since the first piece, when 16 KiB have built up, or when anything else happens in the session, so the order of events is kept. A client appends consecutive chunks.
@@ -678,6 +703,14 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **Session events:** `toolCall` gained `turnId?`, `content?` and `rawInput?`; `toolCallUpdate` gained `title?`, `kind?` and `locations?`; `permissionRequested` gained `turnId?` and `title`; `turnEnded` gained `message?`; `usage` gained `turnId?` and is per turn; `stateChanged` gained `reason?`. New: `permissionResolved` and `modelChanged`. The ACP-mirrored values are camelCase open enums. How text is chunked.
 - **Inbox:** `source.toolCallId`, `closedAt`, the `expired` filter; answering anything but an open item is `conflict`; how permission requests map to items.
 - **Index:** what `burrowd` puts there, committed with the change it summarises.
+
+**2026-11-09, the ACP adapter.** Running Claude Code, Codex and Cursor settled these, now stated in their sections:
+- **Installing adapters:** `agent/install`; `AgentInfo` gained `adapter?` and `defaultAgentMode?`; an agent whose adapter is missing isn't `available` (D-024).
+- **Agent modes:** `session/create` gained `agentMode?`; `Session` gained `agentMode?` and `agentModes?`; new `session/setAgentMode` and the `agentModeChanged` event (D-024).
+- **Models:** an unknown `model` is `-32602`, on `session/create` and `session/setModel`.
+- **Cancels the agent ignores:** the turn is ended for it and the agent restarted (D-025).
+- **Tool kinds:** `switchMode` joined the known values.
+- **`fake-acp`** exists with `--dev`.
 
 ## Open questions
 

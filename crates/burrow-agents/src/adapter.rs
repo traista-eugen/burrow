@@ -9,7 +9,7 @@
 //!
 //! | Burrow → agent | Agent → Burrow |
 //! |---|---|
-//! | [`AgentSession::prompt`], [`cancel`](AgentSession::cancel), [`set_model`](AgentSession::set_model), [`stop`](AgentSession::stop) | [`AgentEvent`]s, in order, ending with [`AgentEvent::Exited`] |
+//! | [`AgentSession::prompt`], [`cancel`](AgentSession::cancel), [`set_model`](AgentSession::set_model), [`set_agent_mode`](AgentSession::set_agent_mode), [`stop`](AgentSession::stop) | [`AgentEvent`]s, in order, ending with [`AgentEvent::Exited`] |
 //! | the [`PermissionReply`] of a request | [`AgentEvent::Permission`] |
 //!
 //! # Rules for adapters
@@ -27,6 +27,12 @@
 //!   [`crate::launcher::AgentProcess`] inside that future does this.
 //! - **Exit.** When the agent process ends, send [`AgentEvent::Exited`] last, then close the
 //!   channel. `error` is `None` only when [`AgentSession::stop`] asked for it.
+//! - **Modes.** An agent with modes of its own (ACP session modes, such as Claude Code's
+//!   `default` or Codex's `read-only`) reports them with [`AgentSession::agent_modes`] and starts
+//!   in the mode that asks before changes. The manager switches to the mode `session/create`
+//!   asked for with [`AgentSession::set_agent_mode`].
+//! - **Installing.** An agent that needs something Burrow installs, such as a pinned npm
+//!   adapter, does it in [`AgentAdapter::install`], never as a side effect of `start`.
 //! - **Never block on the event channel.** It is unbounded; nothing the manager does waits for
 //!   an adapter's event to be read.
 
@@ -34,7 +40,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use burrow_protocol::{
-    AgentId, AgentInfo, ContentBlock, Integration, ModelInfo, PermissionOption, Plan,
+    AgentId, AgentInfo, AgentMode, ContentBlock, Integration, ModelInfo, PermissionOption, Plan,
     ProviderUsage, Timestamp, ToolCall, ToolCallUpdate, TurnEndReason,
 };
 use futures::future::BoxFuture;
@@ -60,6 +66,20 @@ pub trait AgentAdapter: Send + Sync + 'static {
     ///
     /// Dropping the future before it resolves must stop everything it started.
     fn start(&self, config: SessionConfig) -> BoxFuture<'_, Result<StartedSession, AgentError>>;
+
+    /// Installs what Burrow manages for this agent, such as the pinned npm adapter an ACP agent
+    /// runs through, and resolves once it is in place. Installing what is already installed
+    /// does nothing. Dropping the future stops the install and leaves nothing half-installed.
+    ///
+    /// The default: there is nothing to install, which is [`AgentError::InvalidState`].
+    fn install(&self) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async move {
+            Err(AgentError::InvalidState(format!(
+                "{} needs nothing installed by Burrow",
+                self.name()
+            )))
+        })
+    }
 }
 
 /// How to start a session.
@@ -114,9 +134,37 @@ pub trait AgentSession: Send + Sync {
     /// records the model itself if this succeeds without one.
     fn set_model(&self, model: String) -> BoxFuture<'_, Result<(), AgentError>>;
 
+    /// The agent's own modes for this session, if it has any: the current one and the ones
+    /// [`AgentSession::set_agent_mode`] accepts. The default: no modes.
+    fn agent_modes(&self) -> Option<AgentModes> {
+        None
+    }
+
+    /// Switches the agent's own mode. The agent may confirm with
+    /// [`AgentEvent::AgentModeChanged`]; the manager records the mode once this succeeds. An
+    /// unknown mode is [`AgentError::Invalid`].
+    ///
+    /// The default: the agent has no modes, which is [`AgentError::Invalid`].
+    fn set_agent_mode(&self, mode: String) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async move {
+            Err(AgentError::Invalid(format!(
+                "this agent has no modes, so it can't switch to {mode:?}"
+            )))
+        })
+    }
+
     /// Ends the agent process and everything it started, and resolves once they are gone.
     /// Calling it again does nothing.
     fn stop(&self) -> BoxFuture<'_, ()>;
+}
+
+/// An agent's own modes in one session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentModes {
+    /// The current mode's id.
+    pub current: String,
+    /// Every mode the session offers.
+    pub available: Vec<AgentMode>,
 }
 
 /// Something the agent did, normalized to Burrow's session events.
@@ -163,6 +211,9 @@ pub enum AgentEvent {
     ProviderUsage(ProviderUsage),
     /// The session now uses another model.
     ModelChanged(String),
+    /// The agent now runs in another of its own modes, for example because it left a planning
+    /// mode by itself.
+    AgentModeChanged(String),
     /// The agent process ended. Always the last event. `error` is `None` when
     /// [`AgentSession::stop`] ended it, and says what happened otherwise.
     Exited {
@@ -221,6 +272,9 @@ pub enum AgentError {
     /// Not possible right now, for example a prompt while the agent is shutting down.
     #[error("{0}")]
     InvalidState(String),
+    /// The request names something the agent doesn't offer, such as an unknown model or mode.
+    #[error("{0}")]
+    Invalid(String),
     /// A provider limit was hit.
     #[error("{message}")]
     LimitReached {

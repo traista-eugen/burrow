@@ -3,16 +3,18 @@
 //!
 //! Each request runs on its own task (D-019) with a [`Cancel`] flag that `$/cancel` sets.
 //! Requests that only read, or that can safely give up halfway (`agent/*`, `project/add`'s git
-//! check, lists), answer `cancelled` as soon as the flag is set. `session/create` gives up its
+//! check, lists), answer `cancelled` as soon as the flag is set; `agent/install` kills npm and
+//! leaves nothing half-installed. `session/create` gives up its
 //! start and stops the session. Requests that change state and finish quickly answer normally.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use burrow_protocol::methods::{
-    AgentList, AgentRefresh, DebugAppend, InboxGet, InboxList, InboxRespond, Ping, ProjectAdd,
-    ProjectGet, ProjectList, ProjectRemove, SessionArchive, SessionCancel, SessionCreate,
-    SessionGet, SessionList, SessionPrompt, SessionSetModel, SessionStop, UsageGet,
+    AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxGet, InboxList, InboxRespond, Ping,
+    ProjectAdd, ProjectGet, ProjectList, ProjectRemove, SessionArchive, SessionCancel,
+    SessionCreate, SessionGet, SessionList, SessionPrompt, SessionSetAgentMode, SessionSetModel,
+    SessionStop, UsageGet,
 };
 use burrow_protocol::{
     DebugAppendParams, DebugAppendResult, Empty, ErrorKind, ErrorObject, Method, Request, Response,
@@ -73,6 +75,15 @@ pub async fn handle(context: &Arc<Context>, request: Request, cancel: Cancel) ->
             })
             .await
         }
+        AgentInstall::NAME => {
+            answer::<AgentInstall, _, _>(&request, |params| {
+                cancellable(
+                    &cancel,
+                    async move { c.agents.install(&params.agent).await },
+                )
+            })
+            .await
+        }
         UsageGet::NAME => {
             answer::<UsageGet, _, _>(&request, |_| async { Ok(c.agents.usage()) }).await
         }
@@ -111,6 +122,12 @@ pub async fn handle(context: &Arc<Context>, request: Request, cancel: Cancel) ->
         SessionSetModel::NAME => {
             answer::<SessionSetModel, _, _>(&request, |params| async move {
                 c.sessions.set_model(params).await.map(|()| Empty {})
+            })
+            .await
+        }
+        SessionSetAgentMode::NAME => {
+            answer::<SessionSetAgentMode, _, _>(&request, |params| async move {
+                c.sessions.set_agent_mode(params).await.map(|()| Empty {})
             })
             .await
         }

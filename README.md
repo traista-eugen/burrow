@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. The real agents' adapters (ACP, MSP) are being built, so for now sessions run a scripted fake agent. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP; Muse Code's adapter (MSP) is being built. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -47,7 +47,7 @@ cargo run -p burrowctl -- debug append index '{"type":"entityCreated","entity":"
 With `--dev`, `burrowd` also offers `fake`: a scripted agent that runs as a real process and spends no quota. Start `burrowd --dev` as above, then:
 
 ```powershell
-cargo run -p burrowctl -- agent list                  # the four real agents, and fake
+cargo run -p burrowctl -- agent list                  # the four real agents, fake and fake-acp
 cargo run -p burrowctl -- session new --agent fake    # prints the session id: ses_…
 cargo run -p burrowctl -- session prompt ses_… "Hello there" --watch
 ```
@@ -69,7 +69,34 @@ cargo run -p burrowctl -- inbox list                                  # terminal
 cargo run -p burrowctl -- inbox respond inb_… allow                   # terminal 1 carries on
 ```
 
-`session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents, which can't run sessions until their adapters land.
+`session watch ses_…` replays a session from the start, and `session stop ses_…` ends its agent process and everything it started. Add `--json` to any command for JSON lines. `burrowd` without `--dev` offers only the real agents.
+
+`fake-acp` is the same idea speaking real ACP, so it runs through the same adapter as Claude Code, Codex and Cursor. Its scripts are listed in `crates/burrow-agents/src/acp/fake_agent.rs`; `/hang` shows what happens when an agent ignores a cancel.
+
+### Try a real agent
+
+Claude Code, Codex and Cursor run through ACP. Each uses its own CLI's login, so log in with `claude`, `codex login` or `agent login` first. **Prompts spend your subscription's quota.**
+
+Claude Code and Codex run through an npm adapter that Burrow installs once, at a pinned version, into `%LOCALAPPDATA%\Burrow\agents`. It needs Node.js 22 or later, takes a few seconds, and uses 400–500 MB. Cursor needs nothing installed.
+
+```powershell
+cargo run -p burrowd                                  # terminal 1: the real agents only
+cargo run -p burrowctl -- agent list                  # terminal 2: shows each adapter and the mode sessions start in
+cargo run -p burrowctl -- agent install claude        # or codex
+cargo run -p burrowctl -- session new --agent claude --cwd D:\scratch
+cargo run -p burrowctl -- session prompt ses_… "Reply with exactly: OK" --watch
+```
+
+Sessions start in the agent's mode that asks before changes: `default` for Claude Code, `read-only` for Codex. Cursor keeps its own `agent` mode, which asks before shell commands but never before file edits. Choose another mode with `session new --agent-mode <mode>`, or switch with `session mode ses_… <mode>`; `session new` prints the modes the agent offers. A permission request waits in the inbox like the fake's:
+
+```powershell
+cargo run -p burrowctl -- session prompt ses_… "Create hello.txt containing hi" --watch   # terminal 2: waits
+cargo run -p burrowctl -- inbox list                                                       # terminal 3
+cargo run -p burrowctl -- inbox respond inb_… <option>                                     # terminal 2 carries on
+cargo run -p burrowctl -- session stop ses_…
+```
+
+The live tests do the same for each agent, through `burrowd`: `cargo test -p burrowd --test acp_live -- --ignored --test-threads=1 --nocapture`.
 
 ### Notes
 
@@ -84,7 +111,7 @@ Check that an ACP agent starts and what it reports. This runs `initialize` and `
 cargo run -p burrow-acp --example probe -- cursor   # or claude, codex
 ```
 
-Claude Code and Codex need their npm adapters installed first; see [architecture.md](docs/architecture.md#acp-agents-as-verified).
+Claude Code and Codex need their npm adapters installed first (`burrowctl agent install claude`); see [architecture.md](docs/architecture.md#acp-agents-as-verified).
 
 ## Documentation
 

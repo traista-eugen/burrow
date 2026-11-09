@@ -3,6 +3,7 @@
 //! ```text
 //! burrowctl status
 //! burrowctl agent list
+//! burrowctl agent install claude
 //! burrowctl session new --agent fake
 //! burrowctl session prompt ses_… "Hello" --watch
 //! burrowctl inbox respond inb_… allow
@@ -20,15 +21,15 @@ use std::time::{Duration, Instant};
 
 use burrow_client::{CallError, Client, ConnectError, ConnectOptions};
 use burrow_protocol::methods::{
-    AgentList, AgentRefresh, DebugAppend, InboxList, InboxRespond, Ping, ProjectAdd, ProjectList,
-    SessionArchive, SessionCancel, SessionCreate, SessionList, SessionPrompt, SessionSetModel,
-    SessionStop, UsageGet,
+    AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxList, InboxRespond, Ping, ProjectAdd,
+    ProjectList, SessionArchive, SessionCancel, SessionCreate, SessionList, SessionPrompt,
+    SessionSetAgentMode, SessionSetModel, SessionStop, UsageGet,
 };
 use burrow_protocol::{
-    AgentId, ClientInfo, ClientKind, ContentBlock, DebugAppendParams, Empty, Event,
-    InboxItemStatus, InboxListParams, InboxRespondParams, ProjectAddParams, SessionCreateParams,
-    SessionIdParams, SessionListParams, SessionMode, SessionPromptParams, SessionSetModelParams,
-    StreamName, SubscribeParams, code,
+    AgentId, AgentInstallParams, ClientInfo, ClientKind, ContentBlock, DebugAppendParams, Empty,
+    Event, InboxItemStatus, InboxListParams, InboxRespondParams, ProjectAddParams,
+    SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
+    SessionSetAgentModeParams, SessionSetModelParams, StreamName, SubscribeParams, code,
 };
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -100,18 +101,28 @@ enum AgentCommand {
         #[arg(long)]
         refresh: bool,
     },
+    /// Install the pinned ACP adapter an agent runs through (Claude Code, Codex): npm, a few
+    /// seconds, a few hundred MB
+    Install {
+        /// The agent: claude or codex
+        agent: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
     /// Start a session and wait until the agent is ready; prints its id
     New {
-        /// The agent: claude, codex, cursor, muse, or fake (with burrowd --dev)
+        /// The agent: claude, codex, cursor, muse, or fake and fake-acp (with burrowd --dev)
         #[arg(long)]
         agent: String,
         /// The model; the agent's default without it
         #[arg(long)]
         model: Option<String>,
+        /// The agent's own mode, for example `read-only` for Codex [default: the mode that asks
+        /// before changes; see `agent list`]
+        #[arg(long, value_name = "MODE")]
+        agent_mode: Option<String>,
         /// The folder the agent works in [default: the project's folder, else the current
         /// directory]
         #[arg(long)]
@@ -158,6 +169,13 @@ enum SessionCommand {
         id: String,
         /// The model
         model: String,
+    },
+    /// Switch the agent's own mode, which decides what it asks permission for
+    Mode {
+        /// The session
+        id: String,
+        /// The mode, one of those `session new` printed
+        mode: String,
     },
     /// End the agent process and everything it started
     Stop {
@@ -224,6 +242,7 @@ async fn main() -> ExitCode {
         Command::Status => ctl.status().await,
         Command::Project(command) => ctl.project(command).await,
         Command::Agent(AgentCommand::List { refresh }) => ctl.agents(refresh).await,
+        Command::Agent(AgentCommand::Install { agent }) => ctl.install(agent).await,
         Command::Usage => ctl.usage().await,
         Command::Session(command) => ctl.session(command).await,
         Command::Inbox(command) => ctl.inbox(command).await,
@@ -376,6 +395,20 @@ impl Ctl {
         self.print_list(&agents, render::agent, "burrowd offers no agents")
     }
 
+    async fn install(&self, agent: String) -> Result<(), String> {
+        let client = self.connect().await?;
+        if !self.json {
+            eprintln!("installing {agent}'s ACP adapter; this takes a few seconds...");
+        }
+        let info = client
+            .call::<AgentInstall>(&AgentInstallParams {
+                agent: AgentId::from(agent),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        self.print(&info, || render::agent(&info))
+    }
+
     async fn usage(&self) -> Result<(), String> {
         let client = self.connect().await?;
         let usage = client
@@ -391,6 +424,7 @@ impl Ctl {
             SessionCommand::New {
                 agent,
                 model,
+                agent_mode,
                 cwd,
                 project,
                 title,
@@ -408,6 +442,7 @@ impl Ctl {
                     agent: AgentId::from(agent),
                     model,
                     mode: SessionMode::Structured,
+                    agent_mode,
                     cwd: cwd.map(|cwd| cwd.display().to_string()),
                     title,
                 };
@@ -440,6 +475,16 @@ impl Ctl {
                     SessionSetModelParams {
                         session_id: id,
                         model,
+                    },
+                )
+                .await
+            }
+            SessionCommand::Mode { id, mode } => {
+                call_empty::<SessionSetAgentMode>(
+                    &client,
+                    SessionSetAgentModeParams {
+                        session_id: id,
+                        agent_mode: mode,
                     },
                 )
                 .await
@@ -740,6 +785,27 @@ mod tests {
             (id.as_str(), text.as_str(), watch),
             ("ses_1", "hello there", true)
         );
+
+        let cli = Cli::try_parse_from([
+            "burrowctl",
+            "session",
+            "new",
+            "--agent",
+            "codex",
+            "--agent-mode",
+            "read-only",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::New { agent_mode, .. }) = cli.command else {
+            panic!("parsed the wrong command");
+        };
+        assert_eq!(agent_mode.as_deref(), Some("read-only"));
+
+        let cli = Cli::try_parse_from(["burrowctl", "agent", "install", "claude"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Agent(AgentCommand::Install { ref agent }) if agent == "claude"
+        ));
 
         let cli = Cli::try_parse_from(["burrowctl", "inbox", "respond", "inb_1", "allow"]).unwrap();
         assert!(matches!(

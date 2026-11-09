@@ -1,4 +1,4 @@
-//! Agents and usage: `agent/list`, `agent/refresh` and `usage/get`.
+//! Agents and usage: `agent/list`, `agent/refresh`, `agent/install` and `usage/get`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -76,8 +76,39 @@ pub struct AgentInfo {
     /// Why it isn't available, or what looks wrong. Human-readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// The ACP adapter Burrow installs and runs for this agent, when it needs one (Claude Code
+    /// and Codex). `agent/install` installs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterInfo>,
+    /// The agent mode Burrow starts sessions in when `session/create` doesn't name one, for
+    /// example Claude Code's `default`. Absent when Burrow keeps the agent's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_mode: Option<String>,
     /// When this was detected.
     pub detected_at: Timestamp,
+}
+
+/// An npm package that connects an agent to ACP, installed by Burrow at a pinned version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterInfo {
+    /// The npm package, for example `@agentclientprotocol/claude-agent-acp`.
+    pub package: String,
+    /// The pinned version Burrow runs.
+    pub version: String,
+    /// Whether that version is installed.
+    pub installed: bool,
+    /// The folder it is, or will be, installed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// `agent/install` params.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInstallParams {
+    /// The agent whose adapter to install.
+    pub agent: AgentId,
 }
 
 /// An agent CLI's login state.

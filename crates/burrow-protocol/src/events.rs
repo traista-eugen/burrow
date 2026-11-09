@@ -16,9 +16,9 @@ use serde_json::{Map, Value, json};
 
 use crate::open_enum::doc_text;
 use crate::session::{
-    AgentMessageChunk, AgentThoughtChunk, LimitReached, ModelChanged, PermissionRequested,
-    PermissionResolved, Plan, StateChanged, TerminalOpened, ToolCall, ToolCallUpdate, TurnEnded,
-    Usage, UserMessage,
+    AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, LimitReached, ModelChanged,
+    PermissionRequested, PermissionResolved, Plan, StateChanged, TerminalOpened, ToolCall,
+    ToolCallUpdate, TurnEnded, Usage, UserMessage,
 };
 use crate::time::Timestamp;
 
@@ -511,6 +511,8 @@ event_enum! {
         StateChanged = "stateChanged",
         /// `session:<id>`: the session now uses another model.
         ModelChanged = "modelChanged",
+        /// `session:<id>`: the agent now runs in another of its modes.
+        AgentModeChanged = "agentModeChanged",
         /// `session:<id>`: a terminal belongs to the session (M4).
         TerminalOpened = "terminalOpened",
     }

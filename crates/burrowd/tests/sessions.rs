@@ -33,6 +33,7 @@ fn create_params(cwd: &Path) -> SessionCreateParams {
         agent: AgentId::Fake,
         model: None,
         mode: SessionMode::Structured,
+        agent_mode: None,
         cwd: Some(cwd.display().to_string()),
         title: None,
     }

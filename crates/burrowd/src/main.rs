@@ -35,6 +35,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use burrow_agents::acp::FAKE_ACP_ID;
 use burrow_protocol::AgentId;
 use clap::Parser;
 
@@ -56,14 +57,19 @@ struct Args {
     data_dir: Option<PathBuf>,
 
     /// Development mode: accept development-only methods such as `debug/append`, and offer the
-    /// scripted fake agent (`fake`)
+    /// scripted fake agents (`fake`, and `fake-acp`, which speaks ACP)
     #[arg(long)]
     dev: bool,
 
-    /// The agents to offer, comma-separated [default: claude,codex,cursor,muse, plus fake with
-    /// --dev]
+    /// The agents to offer, comma-separated [default: claude,codex,cursor,muse, plus fake and
+    /// fake-acp with --dev]
     #[arg(long, value_delimiter = ',', value_name = "IDS")]
     agents: Option<Vec<String>>,
+
+    /// Where `agent install` puts the ACP adapters Claude Code and Codex run through
+    /// [default: %LOCALAPPDATA%\Burrow\agents]
+    #[arg(long, value_name = "DIR")]
+    agents_dir: Option<PathBuf>,
 }
 
 /// The agents offered when `--agents` isn't given.
@@ -118,8 +124,14 @@ fn run(args: Args) -> Result<(), Fatal> {
     logging::init(&data_dir.join("logs"))
         .map_err(|error| Fatal::other(format!("can't start logging: {error}")))?;
 
+    let agents_dir = match args.agents_dir {
+        Some(dir) => dir,
+        None => std::env::var_os("LOCALAPPDATA")
+            .map(|dir| PathBuf::from(dir).join("Burrow").join("agents"))
+            .unwrap_or_else(|| data_dir.join("agents")),
+    };
     let agents = agent_ids(args.agents.as_deref(), args.dev);
-    let result = start(args.pipe, &data_dir, args.dev, agents);
+    let result = start(args.pipe, &data_dir, &agents_dir, args.dev, agents);
     match &result {
         Ok(()) => tracing::info!("burrowd stopped"),
         Err(fatal) => tracing::error!("{fatal}"),
@@ -127,7 +139,8 @@ fn run(args: Args) -> Result<(), Fatal> {
     result
 }
 
-/// The agents to offer: `--agents`, or the default list. `fake` only with `--dev`.
+/// The agents to offer: `--agents`, or the default list. `fake` and `fake-acp` only with
+/// `--dev`.
 fn agent_ids(requested: Option<&[String]>, dev: bool) -> Vec<AgentId> {
     let mut ids: Vec<AgentId> = match requested {
         Some(ids) => ids
@@ -140,6 +153,7 @@ fn agent_ids(requested: Option<&[String]>, dev: bool) -> Vec<AgentId> {
             let mut ids: Vec<AgentId> = DEFAULT_AGENTS.iter().copied().map(AgentId::from).collect();
             if dev {
                 ids.push(AgentId::Fake);
+                ids.push(AgentId::from(FAKE_ACP_ID));
             }
             ids
         }
@@ -148,6 +162,12 @@ fn agent_ids(requested: Option<&[String]>, dev: bool) -> Vec<AgentId> {
         AgentId::Fake if !dev => {
             tracing::warn!("the fake agent is offered only with --dev");
             false
+        }
+        AgentId::Other(other) if other == FAKE_ACP_ID => {
+            if !dev {
+                tracing::warn!("the fake ACP agent is offered only with --dev");
+            }
+            dev
         }
         AgentId::Other(other) => {
             tracing::warn!(agent = other, "no such agent; ignoring it");
@@ -161,6 +181,7 @@ fn agent_ids(requested: Option<&[String]>, dev: bool) -> Vec<AgentId> {
 fn start(
     pipe: Option<String>,
     data_dir: &Path,
+    agents_dir: &Path,
     dev: bool,
     agents: Vec<AgentId>,
 ) -> Result<(), Fatal> {
@@ -174,20 +195,20 @@ fn start(
         .thread_name("burrowd")
         .build()
         .map_err(|error| Fatal::other(format!("can't start the async runtime: {error}")))?;
-    runtime.block_on(serve(pipe, data_dir, dev, agents))
+    runtime.block_on(serve(pipe, data_dir, agents_dir, dev, agents))
 }
 
 #[cfg(windows)]
 async fn serve(
     pipe: String,
     data_dir: &Path,
+    agents_dir: &Path,
     dev: bool,
     agent_ids: Vec<AgentId>,
 ) -> Result<(), Fatal> {
     use std::sync::Arc;
 
-    use burrow_agents::Registry;
-    use burrow_agents::fake::FakeAdapter;
+    use burrow_agents::{Registry, RegistryOptions};
     use burrow_store::Store;
     use tracing::{info, warn};
 
@@ -211,10 +232,17 @@ async fn serve(
     let hub = Hub::start(store)
         .map_err(|error| Fatal::other(format!("can't start the store thread: {error}")))?;
 
-    let fake = FakeAdapter::next_to_current_exe()
-        .map(|fake| fake.program().clone())
-        .ok();
-    let registry = Registry::standard(&agent_ids, fake);
+    let exe = std::env::current_exe().ok();
+    let next_to_exe = |program: &str| {
+        exe.as_ref()
+            .map(|exe| exe.with_file_name(format!("{program}{}", std::env::consts::EXE_SUFFIX)))
+    };
+    let options = RegistryOptions {
+        fake_program: next_to_exe(burrow_agents::fake::PROGRAM),
+        fake_acp_program: next_to_exe(burrow_agents::acp::FAKE_ACP_PROGRAM),
+        agents_dir: agents_dir.to_owned(),
+    };
+    let registry = Registry::standard(&agent_ids, &options);
     let agents = Arc::new(Agents::new(registry));
     let projects = Arc::new(
         Projects::load(hub.clone())
@@ -235,6 +263,7 @@ async fn serve(
         protocol = burrow_protocol::PROTOCOL_VERSION,
         pipe = listener.path(),
         data_dir = %data_dir.display(),
+        agents_dir = %agents_dir.display(),
         dev,
         agents = ?agent_ids,
         "burrowd is listening"
@@ -262,6 +291,7 @@ async fn serve(
 async fn serve(
     _pipe: String,
     _data_dir: &Path,
+    _agents_dir: &Path,
     _dev: bool,
     _agents: Vec<AgentId>,
 ) -> Result<(), Fatal> {
