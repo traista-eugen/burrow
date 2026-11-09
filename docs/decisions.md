@@ -28,6 +28,8 @@ Every decision that shapes the architecture gets an entry here.
 | [D-019](#d-019-requests-run-concurrently-and-cancel-is-honoured) | Requests run concurrently, and `$/cancel` is honoured | 2026-11-09 | accepted |
 | [D-020](#d-020-acp-agents-are-launched-directly-npm-adapters-from-a-pinned-burrow-local-install) | ACP agents are launched directly; npm adapters from a pinned, Burrow-local install | 2026-11-09 | accepted |
 | [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
+| [D-022](#d-022-msp-types-are-written-by-hand-and-checked-against-muses-schema) | MSP types are written by hand and checked against Muse's schema | 2026-11-09 | accepted |
+| [D-023](#d-023-burrow-runs-muses-versioned-binary-not-its-launcher) | Burrow runs Muse's versioned binary, not its launcher | 2026-11-09 | accepted |
 
 ---
 
@@ -435,3 +437,44 @@ Opening the pipe stays with each side: `burrowd` creates it with its security de
 - Tool calls arrive as `toolCall` and `toolCallUpdate` events with text and diff content, never as Burrow terminals. `terminalOpened` stays unused by ACP sessions for now.
 - Each agent's own permission settings decide what it asks about, so the session mode matters. Claude Code asks before edits only in its `default` mode; the user's configured default here was `auto`. Codex asks in `read-only` mode. Cursor never asks before file edits, only before shell commands.
 - Revisit this if Burrow gets an editor view whose unsaved buffers agents should see, or if an agent needs client terminals.
+
+## D-022 MSP types are written by hand and checked against Muse's schema
+
+**Decision.**
+- `muse schema generate-json-schema` output is committed unchanged in `crates/burrow-msp/schema/`, with the Muse version it came from (1.4.14, stable surface).
+- The Rust types in `burrow-msp` are a hand-written serde subset of it: about 90 types, named after the schema's `$defs`.
+- Tests keep them honest, in two layers:
+  1. **Types against definitions.** In unit tests every wire type derives `schemars::JsonSchema`. `src/schema_check.rs` compares each type with its definition: every member exists with a compatible JSON type; a type the client decodes requires nothing the schema leaves optional; a type it sends always sends what the schema requires. Each open enum's known values must equal the schema's enum, and the error kinds must match the error table.
+  2. **Frames against the schema.** Transcripts recorded from Muse (`tests/fixtures/`) and all live echo traffic, both directions, are validated with `jsonschema`, and must decode without a `Malformed` event.
+
+**Why.**
+- The export is 437 KB: 388 definitions and 70 methods. A coding session needs a fraction of that.
+- Generated code would get the open enums wrong. The schema marks them with `"x-msp-openness": "open"`, an extension generators such as `typify` don't read, so they'd become closed Rust enums. A newer Muse adding an item kind or status would then fail to decode, which MSP forbids: clients must render unknown kinds generically.
+- Many MSP objects are flat unions: `Item` has about 90 optional members, which apply by `kind`. Generated or not, they need a typed view on top (`Item::details`), and hand-written types read like the rest of the codebase.
+- The checks catch what generation would: typos, renamed members, and members that became required or optional.
+
+**Alternatives considered.**
+- `typify` in a build script or `cargo xtask msp-types`: large unidiomatic output and closed enums, as above.
+- The TypeScript export: easier to read, but no Rust tooling.
+- No schema at all: nothing would notice when Muse changes.
+
+**Consequences.**
+- When Muse updates: regenerate the schema, run `cargo test -p burrow-msp`, and fix what fails. New members are added by hand.
+- `MspClient::connect` compares Muse's schema fingerprint with the committed one and logs a warning when they differ; calls still work.
+- The live echo tests validate against the committed schema, so they fail when Muse's wire drifts in a way the old schema rejects, such as a new enum value. That failure is the signal to regenerate.
+
+## D-023 Burrow runs Muse's versioned binary, not its launcher
+
+**Decision.**
+- `burrow_msp::locate_muse` resolves the `muse.cmd` launcher to the binary it would run: `muse-bin-<version>.exe` in the same folder, where `.muse-version` names the version.
+- `MuseCommand` spawns that binary directly, with `CREATE_NO_WINDOW`. If the layout isn't there, it falls back to the launcher.
+
+**Why.**
+- `muse.cmd` starts Windows PowerShell, which runs a launcher script, which starts the binary. That's two extra processes per session and about 300 ms more per start: 306 ms through the launcher against 13 ms for the binary, measured with `--version`.
+- The launcher checks for updates and sometimes starts a hidden PowerShell updater with `Start-Process`. Inside a session's Job Object, stopping the session would kill the updater mid-download; outside one, it would escape Burrow's cleanup.
+- The process Burrow owns should be the one speaking MSP, so stopping a session stops the agent, with nothing in between (D-007).
+
+**Consequences.**
+- Burrow never updates Muse. The user's own `muse` runs do, since the launcher checks hourly.
+- A running binary is locked, so an update can't delete it under a live session. The launcher removes old binaries on a later update.
+- If Muse changes its install layout, `locate_muse` falls back to the launcher and everything still works, just slower.

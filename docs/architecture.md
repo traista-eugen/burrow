@@ -104,7 +104,7 @@ Each adapter does two jobs:
 | Claude Code | ACP through `@agentclientprotocol/claude-agent-acp` 0.101.0 (npm) | Wraps the Claude Agent SDK. Before distributing Burrow, check Anthropic's terms: third-party products are expected to use API keys rather than claude.ai login unless approved. |
 | Codex | ACP through `@agentclientprotocol/codex-acp` 2.6.0 (npm) | The adapter runs `codex app-server` itself. A direct app-server adapter is the fallback if Burrow needs Codex's structured rate limits. |
 | Cursor | ACP, built in: `agent acp` | Log in with `agent login` or set `CURSOR_API_KEY`. |
-| Muse Code | MSP, Meta's own protocol, through `muse serve` | `muse schema` exports the exact schema. `--provider echo` runs without spending tokens, which suits tests. `usage/read` reports the remaining subscription allowance. |
+| Muse Code | MSP, Meta's own protocol, through `muse serve`. Client: `burrow-msp` | Verified with Muse 1.4.14; see [Muse over MSP](#muse-over-msp). `--provider echo` is free and suits tests, but can't call tools. |
 | Any other CLI | Terminal (ConPTY) | The universal fallback. Burrow sees only the screen, not structure. |
 
 The ACP side is the `burrow-acp` crate, built on the `agent-client-protocol` SDK (5.0.0). The two npm adapters need Node.js 22 or later.
@@ -162,6 +162,21 @@ None of them needs `authenticate` when its CLI is logged in. Burrow offers them 
 - **Detection** of all four agents works (see [protocol.md](protocol.md#agents-roles-and-usage)).
 - **ACP and MSP adapters** are M2's phase 2. Their modules, `burrow_agents::acp` and `burrow_agents::msp`, detect the agents and refuse to start until then; their docs say how they will wrap `burrow-acp` and `burrow-msp`.
 - **The fake agent** (`burrow_agents::fake`, binary `burrow-fake-agent`) is a scripted agent for tests and for trying Burrow by hand, offered as `fake` when `burrowd` runs with `--dev`. It is a real child process with a child of its own, so it exercises the Job Objects.
+
+#### Muse over MSP
+
+`burrow-msp` is a client for MSP that depends on none of Burrow's crates; the Muse adapter wraps it. What it does, as verified against Muse 1.4.14 on 2026-11-09:
+
+- **Wire:** JSON-RPC 2.0 over the process's stdio, one message per line. `initialize`, then the `initialized` notification. Errors carry `data.kind` (such as `commandRejected`) and often `data.reason` (such as `missing_run`).
+- **Types:** written by hand against Muse's own schema export, which is committed in `crates/burrow-msp/schema/`, and checked against it by tests (D-022). `initialize` returns the schema's fingerprint; a different one is logged as a warning.
+- **Process:** Burrow runs the versioned binary behind the `muse.cmd` launcher, not the launcher (D-023). Muse's stderr is drained and its last lines kept, so a Muse that exits before the handshake is reported with its reason, for example `--provider local`, which needs macOS.
+- **Sessions and turns:** `session/start` subscribes the connection to the session. `turn/start` answers at once with the turn id; the turn streams `item/started`, `item/delta` and `item/completed` (user message, agent message, reasoning, tool calls with `patchSummary` for edits), and always ends with one `turn/completed`. A failed turn reports its error there, never as a JSON-RPC error.
+- **Approvals:** Muse sends the request `approval/request` and the notification `approval/requested`. The client answers the request with an empty receipt `{}` and surfaces one event per requirement. The decision goes back as `approval/decide` with one of the offered `choiceId`s. The echo provider never asks, so the round trip was recorded once from `meta` and is replayed in tests.
+- **Stopping:** `turn/interrupt` and `turn/cancel` end the running turn with terminal `cancelled`. With no turn running, they're refused (`commandRejected`, `missing_run`).
+- **Models:** `model/list` lists the `meta` catalog with prices; `session/setModel` switches. Echo sessions refuse a switch (`invalid_target`).
+- **Limits:** a quota stop is a failed turn whose error has `quota` (`limitKind`, `resetsAtMs`); `authRequired` or `requestDenied` means the provider is unavailable. The development account has no subscription allowance (`muse usage --json` says `no_allowance`), yet `meta` turns complete normally and are billed per token: Muse's system prompt is about 25k input tokens per model call. `usage/read` answers `{}` there, with no `usage` member, and no `usage/changed` arrives.
+- **Shell on Windows:** `initialize` reports `sandboxAvailability: "unavailable"`, and Muse's shell tool fails ("windows elevated sandbox setup has not run") until `muse sandbox setup` has run elevated, or with `muse serve --disable-sandbox`. File tools work.
+- **Shutdown:** closing Muse's stdin makes it close each session (`session/closed`, reason `hostShutdown`) and exit with code 0.
 
 ### Flow engine
 
@@ -243,6 +258,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name, newline-delimited JSON framing (D-013), and the check that a pipe's server runs as the current user | implemented |
 | `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection and fake agent done; ACP and MSP in M2 phase 2 |
 | `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; `burrowd` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
+| `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | client done; not yet wrapped as an adapter |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |
 | `xtask` | bin | Repository tasks: `cargo xtask schema` writes `schema/burrow-protocol.schema.json`; `cargo xtask icons` renders `assets/icon/*.svg` into the Windows `.ico` files | `schema`, `icons` |

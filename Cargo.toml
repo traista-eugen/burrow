@@ -11,6 +11,7 @@ members = [
     "xtask",
     "crates/burrow-agents",
     "crates/burrow-acp",
+    "crates/burrow-msp",
 ]
 
 [workspace.package]
@@ -57,6 +58,8 @@ resvg = { version = "0.45.1", default-features = false }
 # exactly; use its types through `agent_client_protocol::v1::schema`.
 agent-client-protocol = "5.0.0"
 tokio-util = "0.7.20"
+# Muse Code's MSP client.
+burrow-msp = { path = "crates/burrow-msp" }
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.

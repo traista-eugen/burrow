@@ -857,6 +857,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-msp"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "jsonschema",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "burrow-protocol"
 version = "0.1.0"
 dependencies = [

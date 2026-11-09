@@ -71,13 +71,14 @@ Every milestone ends with something you can run.
   - [ ] Cursor: `agent acp`
   - [ ] Claude Code: `@agentclientprotocol/claude-agent-acp`
   - [ ] Codex: `@agentclientprotocol/codex-acp`
-- [ ] **MSP adapter for Muse** (`muse serve`). Generate its types from `muse schema`, and test with `--provider echo`.
+  - The client crate, `burrow-acp`, is done and passed live tests against all three (D-020, D-021); wrapping it behind the adapter interface remains.
 - [x] **The adapter interface** (`burrow-agents`): `AgentAdapter`, `AgentSession`, `AgentEvent`; the ACP and MSP adapters plug into its `acp` and `msp` slots (D-018).
 - [x] **A scripted fake agent** (`burrow-fake-agent`, a real process tree), offered with `burrowd --dev`: echo, permission requests, a simulated limit, slow turns.
 - [x] **Session methods and events:** sessions are stored as `session:<id>` streams, with summaries on `index` and rows committed with them (D-017). Agent text is stored in chunks of about 100 ms. A restart marks live sessions `stopped`.
 - [x] **Projects, kept minimal:** `project/add` (detecting the git `origin`), `list`, `get`, `remove`.
 - [x] **Permission requests become inbox items**, answered through `inbox/respond`; answering twice is `conflict`.
 - [x] **Job Objects** for every agent process, started suspended. Keep Windows awake while sessions are working.
+- [ ] **MSP adapter for Muse** (`muse serve`). Its types are written by hand and checked against the committed `muse schema` export (D-022); tests use `--provider echo`. The client crate, `burrow-msp`, is done; wrapping it behind the adapter interface remains.
 - [ ] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report.
   - Done in the core: `limitReached` and `AgentEvent::ProviderUsage` in the adapter interface, the `limited` state, prompts refused until `resetsAt`, `usage/get` and its types. Tested with the fake's simulated limit.
   - Left for the adapters: detecting each real agent's limits, and Muse's `usage/read`.
