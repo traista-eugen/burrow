@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 burrow-acp.workspace = true
+burrow-msp.workspace = true
 burrow-protocol.workspace = true
 futures.workspace = true
 jiff.workspace = true

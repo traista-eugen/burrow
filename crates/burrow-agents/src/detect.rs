@@ -11,6 +11,10 @@
 //! | Muse | `muse --version` | `muse usage` ("not logged in", or the allowance) | — |
 //!
 //! Commands run through the launcher, in their own Job Objects, with a timeout.
+//!
+//! Muse is detected by [`crate::msp::MspAdapter`], which runs the same commands on Muse's
+//! versioned binary, not its `muse.cmd` launcher (D-023), and asks a throwaway
+//! `muse serve --provider echo` for the models and whether the shell sandbox is set up.
 
 use std::env;
 use std::path::PathBuf;

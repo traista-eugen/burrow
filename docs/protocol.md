@@ -304,9 +304,9 @@ type RoleConfig = { role: string; candidates: Candidate[]; waitIfResetWithinMinu
 
 How detection works (M2):
 - **Which agents:** `claude`, `codex`, `cursor` and `muse` by default (`burrowd --agents` changes the list). With `--dev`, also `fake`, a scripted agent for tests that spends no quota, and `fake-acp`, a scripted agent that speaks ACP and runs through the same adapter as Claude Code, Codex and Cursor.
-- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout.
+- **What runs:** only read-only commands that spend no quota: `--version`, then `claude auth status`, `codex login status`, `agent status` or `muse usage` for the login, and `agent models` for Cursor's models. Each runs in its own Job Object with a 20-second timeout. For Muse they run its versioned binary, and a throwaway `muse serve --provider echo` gives its models and whether its shell sandbox is set up.
 - **When:** in the background when `burrowd` starts, and on `agent/refresh`. `agent/list` returns the cached result, waiting for the first detection if it hasn't finished.
-- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. For Claude Code and Codex it is also false while their ACP adapter (`adapter`) isn't installed, or Node.js isn't on `PATH`, and `problem` names the `burrowctl agent install` command. Until the MSP adapter lands, Muse is never available.
+- **`available`** is false when the agent isn't installed, is logged out, or Burrow can't drive it yet; `problem` says which. For Claude Code and Codex it is also false while their ACP adapter (`adapter`) isn't installed, or Node.js isn't on `PATH`, and `problem` names the `burrowctl agent install` command. An available agent can have a `problem` too, for something that looks wrong, such as Muse's shell sandbox not being set up.
 - **`defaultAgentMode`** is the [agent mode](#sessions) a session starts in when `session/create` names none: `default` for Claude Code and `read-only` for Codex, both of which ask before edits and commands. Cursor has none and keeps its own default, `agent`, which asks before shell commands but never before file edits (D-024).
 
 `agent/install` (D-024):
@@ -314,7 +314,7 @@ How detection works (M2):
 - **The answer** is the agent's `AgentInfo`, detected again, once the install is done. Installing what is installed answers at once; two installs of one agent run one after the other.
 - **Errors:** an agent with nothing to install (Cursor, Muse, the fakes) is `invalidState`. An agent `burrowd` doesn't offer, or a missing npm, is `unavailable`. An npm failure is `-32603`, with npm's last lines in the message.
 - **`$/cancel`** kills npm and answers `cancelled`. npm works in a staging folder that is moved into place only when it succeeded, so a cancelled or failed install never looks installed.
-- **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. It is kept in memory only, and is empty again after a restart.
+- **Usage** stays empty until an agent reports something: a `limitReached` from a session sets that provider's `limited` and `resetsAt`. Muse also reports its subscription usage (provider `muse`) when a session starts and when it changes; an empty reading means none was observed, not a limit. Usage is kept in memory only, and is empty again after a restart.
 
 ### Sessions
 

@@ -13,7 +13,7 @@
 //! - [`acp`]: the ACP adapter for Claude Code, Codex and Cursor, built on `burrow-acp`: launching,
 //!   installing the pinned npm adapters, modes, the event mapping, the stuck-turn watchdog, and
 //!   a scripted fake ACP agent (`burrow-fake-acp-agent`).
-//! - [`msp`]: the slot for the MSP adapter, built on `burrow-msp`.
+//! - [`msp`]: the MSP adapter, which runs Muse Code sessions on the `burrow-msp` client (D-026).
 //! - [`registry`]: the set of adapters `burrowd` offers.
 //!
 //! The crate knows nothing about streams, inbox items or `burrowd`'s state: the session manager

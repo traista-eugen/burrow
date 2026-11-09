@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0 and M1 done. M2 in progress: the core (protocol, sessions, inbox, Job Objects, the fake agent) and the ACP adapter (Claude Code, Codex, Cursor) are done; the MSP adapter is being built. Last updated 2026-11-09.
+> **Status:** M0 and M1 done. M2 in progress: the core (protocol, sessions, inbox, Job Objects, the fake agent), the ACP adapter (Claude Code, Codex, Cursor) and the MSP adapter (Muse) are done; the by-hand check of its "done when" from `burrowctl` remains. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -80,11 +80,11 @@ Every milestone ends with something you can run.
 - [x] **Projects, kept minimal:** `project/add` (detecting the git `origin`), `list`, `get`, `remove`.
 - [x] **Permission requests become inbox items**, answered through `inbox/respond`; answering twice is `conflict`.
 - [x] **Job Objects** for every agent process, started suspended. Keep Windows awake while sessions are working.
-- [ ] **MSP adapter for Muse** (`muse serve`). Its types are written by hand and checked against the committed `muse schema` export (D-022); tests use `--provider echo`. The client crate, `burrow-msp`, is done; wrapping it behind the adapter interface remains.
+- [x] **MSP adapter for Muse** (`muse serve`), in `burrow_agents::msp` on the `burrow-msp` client. Its types are written by hand and checked against the committed `muse schema` export (D-022). One `muse serve` per session, mapped onto Burrow's session events, approvals included (D-026). No user-input questions yet, and the sandbox stays on (D-027). Tests use `--provider echo` through `burrowd`, and replay a recorded approval; a live `meta` test passed on 2026-11-09.
 - [ ] **Limits:** detect usage limits and emit `limitReached`. `usage/get` uses Muse's `usage/read`, plus whatever the other agents report.
   - Done in the core: `limitReached` and `AgentEvent::ProviderUsage` in the adapter interface, the `limited` state, prompts refused until `resetsAt`, `usage/get` and its types. Tested with the fake's simulated limit.
   - Done in the ACP adapter: Claude Code's, Codex's and Cursor's limits, detected by `burrow-acp`, become `limitReached` with `resetsAt` when the agent says; Claude Code's rate-limit status feeds `usage/get`. Tested with the fake ACP agent; no live limit was triggered.
-  - Left for the MSP adapter: Muse's limits and its `usage/read`.
+  - Muse: done. Its quota failures become `limitReached`, and `usage/read` and `usage/changed` feed `usage/get` (D-026).
 - [x] **Requests on their own tasks, and `$/cancel`** (D-019). **Clients check that the pipe's server runs as the current user.** Both were open from M1.
 - [x] **`burrowctl session`:** `new` (`--agent-mode`), `list`, `prompt` (`--watch`), `watch`, `cancel`, `model`, `mode`, `stop`, `archive`; `inbox list|respond`; `project add|list`; `agent list|install`; `usage`. Readable text, or `--json`.
 
@@ -94,7 +94,7 @@ Every milestone ends with something you can run.
 
 ✅ The second passes, with the fake agent's real process tree: `stopping_a_session_leaves_no_stray_processes` in `crates/burrowd/tests/sessions.rs`. The same file covers streaming, the inbox, cancelling, the simulated limit, `$/cancel`, and a hard-killed `burrowd` taking its agents with it. `crates/burrowd/tests/acp.rs` does the same for ACP sessions, with the fake ACP agent.
 
-The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow-client`: `crates/burrowd/tests/acp_live.rs` (run by hand on 2026-11-09) prompts each, streams the answer, approves a permission request with `inbox/respond`, and checks no process is left after `session/stop`. Still to do: the same by hand from `burrowctl`, and Muse, which waits for the MSP adapter.
+The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow-client`: `crates/burrowd/tests/acp_live.rs` (run by hand on 2026-11-09) prompts each, streams the answer, approves a permission request with `inbox/respond`, and checks no process is left after `session/stop`. For Muse, `crates/burrowd/tests/muse.rs` covers prompting, streaming, cancelling and a clean stop with `echo`, and its live test approves a shell command from the inbox (D-027 says why that test turns Muse's sandbox off). Still to do: the same by hand from `burrowctl`.
 
 ## M3: Desktop app v1
 

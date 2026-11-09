@@ -824,6 +824,7 @@ name = "burrow-agents"
 version = "0.1.0"
 dependencies = [
  "burrow-acp",
+ "burrow-msp",
  "burrow-protocol",
  "futures",
  "jiff",

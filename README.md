@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP; Muse Code's adapter (MSP) is being built. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app is still an empty window. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -21,6 +21,7 @@ cargo run -p burrow-app     # desktop app (burrow.exe)
 cargo xtask schema          # regenerate schema/burrow-protocol.schema.json
 cargo xtask icons           # regenerate the .ico files from assets/icon/*.svg
 cargo test -p burrow-msp    # the Muse client; drives `muse serve --provider echo` if Muse is installed
+cargo test -p burrowd --test muse   # Muse sessions through burrowd, on the free echo provider
 ```
 
 Try the service and the command-line client. Start `burrowd` in one terminal; `--dev` enables `debug/append`:
@@ -97,6 +98,20 @@ cargo run -p burrowctl -- session stop ses_…
 ```
 
 The live tests do the same for each agent, through `burrowd`: `cargo test -p burrowd --test acp_live -- --ignored --test-threads=1 --nocapture`.
+
+### Try a session with Muse Code
+
+With [Muse Code](docs/architecture.md#muse-over-msp) installed and signed in, `burrowd` runs Muse sessions. To try it without spending tokens, use Muse's free `echo` provider, which replies `echo: <your prompt>`:
+
+```powershell
+$env:BURROW_MUSE_PROVIDER = "echo"; cargo run -p burrowd -- --agents=muse   # leave out the variable for real turns
+cargo run -p burrowctl -- session new --agent muse --cwd C:\path\to\a\folder   # in a second terminal
+cargo run -p burrowctl -- session prompt ses_… "Hello, Muse" --watch
+```
+
+Muse asks before tool calls it can't sandbox. Its questions arrive in the inbox, like the fake's (`inbox list`, `inbox respond inb_… allow_once`).
+
+**Muse's shell tool needs its Windows sandbox.** Until you run `muse sandbox windows setup` in an elevated terminal, Muse's shell commands fail; its other tools work. `agent list --json` reports it as Muse's `problem`. Burrow never turns the sandbox off for you. To see an approval anyway, start `burrowd` with `$env:BURROW_MUSE_DISABLE_SANDBOX = "1"`: Muse then asks before every shell command it doesn't already allow (D-027).
 
 ### Notes
 
