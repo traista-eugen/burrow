@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0 done; M1 is next. Last updated 2026-11-06.
+> **Status:** M0 done; M1 in progress. Last updated 2026-11-09.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -16,7 +16,7 @@ Every milestone ends with something you can run.
 | # | Milestone | Outcome | Status |
 |---|---|---|---|
 | M0 | Foundation | Workspace builds; an empty GPUI window opens | ✅ done |
-| M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ⏳ next |
+| M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ⏳ in progress |
 | M2 | Agent sessions | All four agents, driven through one event model | |
 | M3 | Desktop app v1 | Usable every day for chatting with agents | |
 | M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
@@ -38,7 +38,7 @@ Every milestone ends with something you can run.
 
 - [ ] **`burrow-protocol` types:** the JSON-RPC envelope, `initialize`, errors, `events/subscribe`, and the `index` stream events. Use serde with camelCase field names.
 - [ ] **Schema export:** generate a JSON Schema with `schemars`, written to `schema/burrow-protocol.schema.json` by `cargo xtask schema`. A test fails if the file is out of date.
-- [ ] **`burrow-store`:** an SQLite event store (`rusqlite`, WAL mode) that appends and reads streams with gap-free sequence numbers. Database changes go through numbered migrations.
+- [x] **`burrow-store`:** an SQLite event store (`rusqlite`, WAL mode) that appends and reads streams with gap-free sequence numbers. Database changes go through numbered migrations. Every commit is synced to disk (D-012).
 - [ ] **`burrowd` server:**
   - named pipe server (`tokio`), restricted to the current user;
   - one task per connection;

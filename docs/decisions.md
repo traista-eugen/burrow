@@ -17,6 +17,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-008](#d-008-remote-access-v1-runs-over-tailscalewireguard-with-per-device-keys) | Remote access v1 runs over Tailscale/WireGuard with per-device keys | 2026-11-05 | accepted |
 | [D-009](#d-009-agents-act-on-github-through-a-github-app) | Agents act on GitHub through a GitHub App | 2026-11-05 | accepted |
 | [D-010](#d-010-burrow-ships-its-own-windows-manifest) | Burrow ships its own Windows manifest | 2026-11-05 | accepted |
+| [D-012](#d-012-the-event-store-syncs-every-commit-to-disk) | The event store syncs every commit to disk | 2026-11-09 | accepted |
 
 ---
 
@@ -175,3 +176,23 @@ GPUI's default `windows-manifest` feature is turned off.
 - Ours adds long-path and UTF-8 support, which matter for repo paths and agent output.
 
 **Consequences.** When upgrading GPUI, check whether its manifest gained settings we should copy.
+
+## D-012 The event store syncs every commit to disk
+
+**Decision.**
+- `burrow-store` runs SQLite in WAL mode with `PRAGMA synchronous = FULL`. Every append fsyncs the write-ahead log before it returns.
+- An append takes the write lock first (`BEGIN IMMEDIATE`), then reads the stream's head and inserts, all in one transaction.
+
+**Why.**
+- Clients resume a stream from the last `seq` they processed (D-005). Suppose a crash rolled back events that clients had already seen. `burrowd` would then give those seqs to new, different events, and a client that saw the lost ones would skip the new ones. Nothing would report the error.
+- In WAL mode, `synchronous = NORMAL` survives a killed process but not a power cut or OS crash: the last commits can roll back. `FULL` closes that gap.
+- The cost is small. On the development machine an append takes about 1.9 ms whether it holds 1 event or 20, because the fsync dominates. Event rates are modest: agent text is stored in chunks of about 100 ms.
+- With a deferred transaction, two connections can both read the same head. The second one's upgrade to a write lock then fails with `SQLITE_BUSY`, without waiting. Taking the lock first makes concurrent appends wait their turn.
+
+**Alternatives considered.**
+- `synchronous = NORMAL`: faster, but loses recent commits on power loss.
+- Detecting lost events after a crash, for example with a store epoch that tells clients to reset. This adds protocol surface for a case that `FULL` prevents.
+
+**Consequences.**
+- An append costs at least one fsync. `burrowd` should batch events that arrive together into one append.
+- If append latency ever becomes a problem, batch more first. Weakening durability needs a new decision.

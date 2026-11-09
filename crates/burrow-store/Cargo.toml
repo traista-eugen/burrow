@@ -1,0 +1,19 @@
+[package]
+name = "burrow-store"
+description = "SQLite event store: append-only streams with gap-free sequence numbers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+# raw_value: payloads are kept as JSON text end to end, so burrowd can splice
+# them into notifications without re-parsing.
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+tempfile.workspace = true

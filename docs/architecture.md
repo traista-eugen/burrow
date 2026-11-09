@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status:** draft. Last updated 2026-11-06.
+> **Status:** draft. Last updated 2026-11-09.
 > `D-NNN` references point to entries in [decisions.md](decisions.md).
 
 ## What Burrow is
@@ -108,7 +108,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 | What | Where |
 |---|---|
-| Database: event logs, entities, settings | `%LOCALAPPDATA%\Burrow\burrow.db` (SQLite, WAL mode) |
+| Database: event logs, entities, settings | `%LOCALAPPDATA%\Burrow\burrow.db` (SQLite, WAL mode, every commit synced to disk: D-012) |
 | Artifacts | `%LOCALAPPDATA%\Burrow\artifacts\<first 2 hex>\<sha256>` |
 | Worktrees for flow runs | `%LOCALAPPDATA%\Burrow\worktrees\<project>\<run>` |
 | Your flow library | `%APPDATA%\Burrow\flows\<flow id>\` |
@@ -143,7 +143,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 | `burrow-app` | bin `burrow` | GPUI desktop client | empty window |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | planned |
 | `burrowctl` | bin | Command-line client | planned |
-| `burrow-store` | lib | SQLite event store | planned |
+| `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, migrations | implemented |
 | `burrow-agents` | lib | Agent adapters: ACP, MSP, terminal | planned |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |
 | `burrow-github` | lib | GitHub providers | planned |

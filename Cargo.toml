@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/burrow-protocol", "crates/burrowd", "crates/burrow-app"]
+members = ["crates/burrow-protocol", "crates/burrowd", "crates/burrow-app", "crates/burrow-store"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,13 @@ burrow-protocol = { path = "crates/burrow-protocol" }
 # Default features minus `windows-manifest`: burrow-app embeds its own manifest
 # (adds long-path + UTF-8 code page), and two manifests fail to link.
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# burrow-store (M1). Crates enable extra features themselves, e.g. serde_json's raw_value.
+burrow-store = { path = "crates/burrow-store" }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = "1.0"
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tempfile = "3.27.0"
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.
