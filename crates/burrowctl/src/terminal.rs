@@ -17,13 +17,13 @@ use std::time::Duration;
 use burrow_client::{Client, Notifications};
 use burrow_protocol::NotificationMethod;
 use burrow_protocol::methods::{
-    TerminalAttach, TerminalDetach, TerminalInput, TerminalResize, TerminalScrollback,
+    SessionGet, TerminalAttach, TerminalDetach, TerminalInput, TerminalResize, TerminalScrollback,
 };
 use burrow_protocol::notifications::{TerminalClosedNotification, TerminalUpdated};
 use burrow_protocol::{
-    Color, CursorShape, Event, MouseTracking, StreamName, TerminalCursor, TerminalIdParams,
-    TerminalInputParams, TerminalLine, TerminalModes, TerminalResizeParams, TerminalRun,
-    TerminalScrollbackParams, TerminalSize, TerminalSnapshot, TerminalUpdate,
+    Color, CursorShape, Event, MouseTracking, SessionIdParams, StreamName, TerminalCursor,
+    TerminalIdParams, TerminalInputParams, TerminalLine, TerminalModes, TerminalResizeParams,
+    TerminalRun, TerminalScrollbackParams, TerminalSize, TerminalSnapshot, TerminalUpdate,
 };
 use tokio::sync::mpsc;
 
@@ -34,11 +34,20 @@ const SIZE_POLL: Duration = Duration::from_millis(200);
 /// How long a session's stream may take to announce its terminal.
 const ANNOUNCE_WAIT: Duration = Duration::from_secs(10);
 
-/// The terminal `id` names: a terminal id as it is, or the terminal a session's stream
-/// announced.
+/// The terminal `id` names: a terminal id as it is, or a session's terminal: its `terminalId`,
+/// or what its stream announced, from an older `burrowd`.
 pub async fn resolve(client: &Client, id: &str) -> Result<String, String> {
     if id.starts_with("trm_") {
         return Ok(id.to_owned());
+    }
+    let session = client
+        .call::<SessionGet>(&SessionIdParams {
+            session_id: id.to_owned(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(terminal) = session.terminal_id {
+        return Ok(terminal);
     }
     let mut events = client
         .subscribe(StreamName::session(id), Some(0))
@@ -57,6 +66,16 @@ pub async fn resolve(client: &Client, id: &str) -> Result<String, String> {
     .flatten();
     let _ = events.unsubscribe().await;
     found.ok_or_else(|| format!("{id} has no terminal: is it a terminal session?"))
+}
+
+/// This console's size, to start a terminal session at with `session new --attach`, so its
+/// program draws its first screen at the size it is shown. `None` outside a console.
+pub fn console_size() -> Option<TerminalSize> {
+    let (cols, rows) = console::Console::open().ok()?.size();
+    Some(TerminalSize {
+        cols: cols.clamp(TerminalSize::MIN_COLS, TerminalSize::MAX_COLS),
+        rows: rows.clamp(TerminalSize::MIN_ROWS, TerminalSize::MAX_ROWS),
+    })
 }
 
 /// `terminal show`: the screen now, as plain text.

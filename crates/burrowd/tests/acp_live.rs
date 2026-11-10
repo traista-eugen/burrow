@@ -172,6 +172,8 @@ async fn live(agent: AgentId, file_prompt: &str) {
             agent_mode: None,
             cwd: Some(work.display().to_string()),
             title: None,
+            cols: None,
+            rows: None,
         })
         .await
         .expect("session/create");

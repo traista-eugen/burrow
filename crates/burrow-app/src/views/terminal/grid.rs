@@ -136,11 +136,22 @@ impl Run {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Line {
     pub runs: Vec<Run>,
+    /// Soft-wrapped: the line's text goes on in the next line, so copying joins the two.
+    pub wrapped: bool,
 }
 
 impl Line {
     pub fn new(runs: Vec<Run>) -> Self {
-        Self { runs }
+        Self {
+            runs,
+            wrapped: false,
+        }
+    }
+
+    /// Marks the line soft-wrapped, or not.
+    pub fn wrapped(mut self, wrapped: bool) -> Self {
+        self.wrapped = wrapped;
+        self
     }
 
     /// One unstyled run.

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use burrow_agents::launcher::{descendants, is_running};
 use burrow_client::{CallError, Client, Notifications};
 use burrow_protocol::methods::{
-    SessionCreate, SessionGet, SessionPrompt, SessionStop, TerminalAttach, TerminalDetach,
-    TerminalInput, TerminalResize, TerminalScrollback,
+    SessionCreate, SessionGet, SessionList, SessionPrompt, SessionStop, TerminalAttach,
+    TerminalDetach, TerminalInput, TerminalResize, TerminalScrollback,
 };
 use burrow_protocol::notifications::{TerminalClosedNotification, TerminalUpdated};
 use burrow_protocol::*;
@@ -35,6 +35,8 @@ async fn create(client: &Client, cwd: &Path) -> (Session, String) {
             agent_mode: None,
             cwd: Some(cwd.to_string_lossy().into_owned()),
             title: None,
+            cols: None,
+            rows: None,
         })
         .await
         .expect("session/create");
@@ -389,6 +391,8 @@ async fn attach_type_and_see_the_screen_change() {
             agent_mode: None,
             cwd: Some(dir.path().to_string_lossy().into_owned()),
             title: None,
+            cols: None,
+            rows: None,
         })
         .await;
     assert!(matches!(refused, Err(CallError::Rpc(error)) if error.code == code::INVALID_PARAMS));
@@ -411,6 +415,80 @@ async fn attach_type_and_see_the_screen_change() {
         })
         .await;
     assert_eq!(error_kind(unknown), ErrorKind::NotFound);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_session_starts_at_the_size_asked_and_names_its_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_daemon, client) = start(dir.path(), "terminal-create-size").await;
+    let params = |mode: SessionMode, cols: Option<u16>, rows: Option<u16>| SessionCreateParams {
+        mode,
+        cols,
+        rows,
+        ..SessionCreateParams::new(AgentId::Fake, dir.path().to_string_lossy())
+    };
+    let session = client
+        .call::<SessionCreate>(&params(SessionMode::Terminal, Some(90), Some(20)))
+        .await
+        .expect("session/create");
+
+    // The session names its terminal, as its stream does.
+    let terminal = session.terminal_id.clone().expect("Session.terminalId");
+    assert_eq!(terminal_of(&client, &session.id).await, terminal);
+    assert_eq!(
+        get(&client, &session.id).await.terminal_id,
+        Some(terminal.clone())
+    );
+
+    // The program drew its first screen at that size: no resize was needed.
+    let mut a = attach(&client, &terminal).await;
+    assert_eq!((a.model.cols, a.model.rows), (90, 20));
+    a.until("the first screen at 90x20", |m| {
+        m.status().starts_with("status 90x20")
+    })
+    .await;
+    assert_eq!(a.model.resets, 0);
+
+    // Lists and the index say it is a terminal session.
+    let listed = client
+        .call::<SessionList>(&SessionListParams::default())
+        .await
+        .unwrap();
+    let summary = listed.iter().find(|s| s.id == session.id).unwrap();
+    assert_eq!(summary.mode, SessionMode::Terminal);
+    let mut index = client
+        .subscribe(StreamName::index(), Some(0))
+        .await
+        .unwrap();
+    let created = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Event::EntityCreated(created) = index.next().await.unwrap().event
+                && created.id == session.id
+            {
+                return created;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(created.mode, Some(SessionMode::Terminal));
+
+    // Both or neither, within terminal/resize's bounds, and only for terminal sessions.
+    for (mode, cols, rows) in [
+        (SessionMode::Terminal, Some(90), None),
+        (SessionMode::Terminal, None, Some(20)),
+        (SessionMode::Terminal, Some(1), Some(20)),
+        (SessionMode::Terminal, Some(90), Some(501)),
+        (SessionMode::Structured, Some(90), Some(20)),
+    ] {
+        let refused = client
+            .call::<SessionCreate>(&params(mode, cols, rows))
+            .await;
+        assert!(
+            matches!(&refused, Err(CallError::Rpc(error)) if error.code == code::INVALID_PARAMS),
+            "{mode:?} {cols:?}x{rows:?}: {refused:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

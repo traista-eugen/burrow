@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use burrow_protocol::{
     AgentId, EntityKind, Event, InboxAction, InboxItem, InboxItemKind, InboxItemStatus,
-    InboxSource, Project, SessionState, SessionSummary, StreamEvent, Timestamp,
+    InboxSource, Project, SessionMode, SessionState, SessionSummary, StreamEvent, Timestamp,
 };
 
 /// A project in the sidebar.
@@ -58,6 +58,8 @@ pub struct SessionEntry {
     pub agent: Option<AgentId>,
     /// The model, if known.
     pub model: Option<String>,
+    /// A terminal session: the agent's own TUI.
+    pub terminal: bool,
     /// The display name, once it has one.
     pub title: Option<String>,
     /// The current state.
@@ -77,6 +79,7 @@ impl SessionEntry {
             project_id: summary.project_id,
             agent: Some(summary.agent),
             model: summary.model,
+            terminal: summary.mode == SessionMode::Terminal,
             title: summary.title,
             state: summary.state,
             activity,
@@ -88,6 +91,7 @@ impl SessionEntry {
     pub fn display_title(&self) -> String {
         match &self.title {
             Some(title) if !title.trim().is_empty() => title.clone(),
+            _ if self.terminal => "Terminal session".to_owned(),
             _ => "New session".to_owned(),
         }
     }
@@ -276,6 +280,7 @@ impl IndexModel {
                                 project_id: created.project_id.clone(),
                                 agent: None,
                                 model: None,
+                                terminal: false,
                                 title: None,
                                 state: SessionState::Starting,
                                 activity: None,
@@ -286,6 +291,9 @@ impl IndexModel {
                     }
                     if created.agent.is_some() {
                         entry.agent = created.agent.clone();
+                    }
+                    if let Some(mode) = created.mode {
+                        entry.terminal = mode == SessionMode::Terminal;
                     }
                     if let Some(state) = &created.state {
                         entry.state = SessionState::from(state.as_str());
@@ -393,6 +401,7 @@ impl IndexModel {
         }
         entry.agent = Some(summary.agent);
         entry.model = summary.model;
+        entry.terminal = summary.mode == SessionMode::Terminal;
         entry.project_id = summary.project_id;
         entry.archived |= summary.archived;
         if summary.title.is_some() {
@@ -545,6 +554,7 @@ mod tests {
             project_id: project.map(Into::into),
             agent: AgentId::Fake,
             model: Some("fake".into()),
+            mode: Default::default(),
             title: Some(format!("title of {id}")),
             state,
             archived: false,
@@ -589,6 +599,7 @@ mod tests {
             state: Some("starting".into()),
             // As an older burrowd sends it.
             agent: None,
+            mode: None,
         }
     }
 
@@ -662,6 +673,27 @@ mod tests {
         // The newest activity sorts first.
         assert_eq!(model.sessions(false)[0].id, "ses_9");
         assert_eq!(model.seq(), 12);
+    }
+
+    #[test]
+    fn terminal_sessions_are_marked_from_the_index_or_the_list() {
+        let mut model = loaded();
+        let created = EntityCreated {
+            agent: Some(AgentId::Fake),
+            mode: Some(SessionMode::Terminal),
+            ..session_created("ses_t", None)
+        };
+        let applied = model.apply(&event(10, created));
+        assert!(applied.fetch.is_empty());
+        assert!(model.session("ses_t").unwrap().terminal);
+        // An older burrowd says nothing: structured until session/get says otherwise.
+        model.apply(&event(11, session_created("ses_u", None)));
+        assert!(!model.session("ses_u").unwrap().terminal);
+        let mut answer = summary("ses_u", None, SessionState::Idle, 11);
+        answer.mode = SessionMode::Terminal;
+        model.upsert_session(answer);
+        assert!(model.session("ses_u").unwrap().terminal);
+        assert!(!model.session("ses_1").unwrap().terminal);
     }
 
     #[test]
@@ -808,6 +840,7 @@ mod tests {
             project_id: None,
             state: Some("queued".into()),
             agent: None,
+            mode: None,
         };
         assert!(!model.apply(&event(51, run)).changed);
         assert_eq!(model.seq(), 51);

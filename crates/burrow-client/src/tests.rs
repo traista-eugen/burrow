@@ -369,6 +369,59 @@ async fn other_notifications_reach_the_notifications_stream() {
 }
 
 #[tokio::test]
+async fn answers_sent_in_order_arrive_among_the_notifications() {
+    let (client, mut server) = connect().await;
+    let mut notifications = client.notifications();
+    let id = client.send_in_order::<Ping>(&Empty {}).unwrap();
+    let request = server.request().await;
+    assert_eq!(request.id, id);
+    // A notification before the answer, then the answer, then one after it.
+    let hello = |n: u32| Notification::new("test/hello", Some(json!({"n": n})));
+    server.send(hello(1).to_line()).await;
+    server
+        .send(Response::ok::<Ping>(request.id, &Empty {}).to_line())
+        .await;
+    server.send(hello(2).to_line()).await;
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        seen.push(
+            timeout(WAIT, notifications.next_incoming())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(seen[0], Incoming::Notification(hello(1)));
+    match &seen[1] {
+        Incoming::Answer(response) => {
+            assert_eq!(response.id.as_ref(), Some(&id));
+            response.result_as::<Ping>().unwrap();
+        }
+        other => panic!("expected the answer, got {other:?}"),
+    }
+    assert_eq!(seen[2], Incoming::Notification(hello(2)));
+
+    // `next` skips such answers.
+    let id = client.send_in_order::<Ping>(&Empty {}).unwrap();
+    let request = server.request().await;
+    assert_eq!(request.id, id);
+    server
+        .send(Response::ok::<Ping>(request.id, &Empty {}).to_line())
+        .await;
+    server.send(hello(3).to_line()).await;
+    let notification = timeout(WAIT, notifications.next()).await.unwrap().unwrap();
+    assert_eq!(notification, hello(3));
+    assert!(notifications.try_next_incoming().is_none());
+
+    // Closed: no request goes out.
+    client.close();
+    assert!(matches!(
+        client.send_in_order::<Ping>(&Empty {}),
+        Err(CallError::Disconnected)
+    ));
+}
+
+#[tokio::test]
 async fn requests_from_the_server_get_method_not_found() {
     let (_client, mut server) = connect().await;
     server

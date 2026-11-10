@@ -31,6 +31,7 @@ use tokio::task::AbortHandle;
 use tracing::{debug, warn};
 
 use crate::error::{CallError, ConnectError};
+use crate::subscription::Incoming;
 
 /// The most bytes the writer gathers into one write.
 const WRITE_BATCH_BYTES: usize = 64 * 1024;
@@ -100,9 +101,18 @@ pub(crate) struct Route {
     events: mpsc::UnboundedSender<StreamEvent>,
 }
 
+/// Where a call's answer goes.
+#[derive(Debug)]
+enum Reply {
+    /// To the caller, which waits for it.
+    Caller(oneshot::Sender<Response>),
+    /// Through the notifications, in order with them ([`crate::Client::send_in_order`]).
+    InOrder,
+}
+
 #[derive(Debug)]
 struct Pending {
-    reply: oneshot::Sender<Response>,
+    reply: Reply,
     /// Installed when the response is a success: the route of an `events/subscribe` call.
     route: Option<(StreamName, Route)>,
 }
@@ -112,7 +122,7 @@ struct State {
     closed: bool,
     pending: HashMap<RequestId, Pending>,
     routes: HashMap<StreamName, Route>,
-    notifications: Option<mpsc::UnboundedSender<Notification>>,
+    notifications: Option<mpsc::UnboundedSender<Incoming>>,
 }
 
 /// What the reader, the writer and every `Client` clone share.
@@ -188,8 +198,14 @@ impl Shared {
         {
             state.routes.insert(stream, route);
         }
-        drop(state);
-        let _ = pending.reply.send(response);
+        match pending.reply {
+            Reply::Caller(reply) => {
+                drop(state);
+                let _ = reply.send(response);
+            }
+            // Queued under the lock, so it keeps its place among the notifications.
+            Reply::InOrder => Self::queue(&mut state, Incoming::Answer(response)),
+        }
     }
 
     fn route_event(&self, notification: &Notification) {
@@ -227,9 +243,13 @@ impl Shared {
     }
 
     fn deliver_notification(&self, notification: Notification) {
-        let mut state = self.state();
+        Self::queue(&mut self.state(), Incoming::Notification(notification));
+    }
+
+    /// Hands a message to the notifications' consumer, if any.
+    fn queue(state: &mut State, message: Incoming) {
         if let Some(sender) = &state.notifications
-            && sender.send(notification).is_err()
+            && sender.send(message).is_err()
         {
             state.notifications = None;
         }
@@ -288,9 +308,30 @@ impl Connection {
         params: &M::Params,
         route: Option<(StreamName, Route)>,
     ) -> Result<(RequestId, oneshot::Receiver<Response>), CallError> {
-        let id = self.shared.next_id();
-        let request = Request::typed::<M>(id.clone(), params);
         let (reply, answer) = oneshot::channel();
+        let line = |id| Request::typed::<M>(id, params).to_line();
+        let id = self.send(line, Reply::Caller(reply), route)?;
+        Ok((id, answer))
+    }
+
+    /// Sends a request whose response is delivered through the notifications, in order.
+    pub fn send_in_order<M: Method>(&self, params: &M::Params) -> Result<RequestId, CallError> {
+        self.send(
+            |id| Request::typed::<M>(id, params).to_line(),
+            Reply::InOrder,
+            None,
+        )
+    }
+
+    /// Registers where the answer goes, then queues the request's `line` for the writer.
+    fn send(
+        &self,
+        line: impl FnOnce(RequestId) -> String,
+        reply: Reply,
+        route: Option<(StreamName, Route)>,
+    ) -> Result<RequestId, CallError> {
+        let id = self.shared.next_id();
+        let line = line(id.clone());
         {
             let mut state = self.shared.state();
             if state.closed {
@@ -298,11 +339,11 @@ impl Connection {
             }
             state.pending.insert(id.clone(), Pending { reply, route });
         }
-        if self.shared.lines.send(request.to_line()).is_err() {
+        if self.shared.lines.send(line).is_err() {
             self.shared.state().pending.remove(&id);
             return Err(CallError::Disconnected);
         }
-        Ok((id, answer))
+        Ok(id)
     }
 
     /// Waits for a response from [`Connection::send_request`].
@@ -348,7 +389,7 @@ impl Connection {
         }
     }
 
-    pub fn notifications(&self) -> mpsc::UnboundedReceiver<Notification> {
+    pub fn notifications(&self) -> mpsc::UnboundedReceiver<Incoming> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut state = self.shared.state();
         if !state.closed {

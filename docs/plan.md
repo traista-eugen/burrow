@@ -1,6 +1,6 @@
 # Implementation plan
 
-> **Status:** M0, M1 and M2 done. M3 is built; its "done when" is the user's everyday-use verdict. Last updated 2026-11-09.
+> **Status:** M0, M1, M2 and M4 done. M3 is built; its "done when" is the user's everyday-use verdict. Last updated 2026-11-10.
 >
 > **Keeping this current:** tick items as they land, in the same commit as the code. If the scope of a milestone changes, edit it here and add an entry to [decisions.md](decisions.md) when the change is architectural.
 
@@ -19,7 +19,7 @@ Every milestone ends with something you can run.
 | M1 | Protocol and service skeleton | `burrowctl` talks to `burrowd`; events survive restarts | ✅ done |
 | M2 | Agent sessions | All four agents, driven through one event model | ✅ done |
 | M3 | Desktop app v1 | Usable every day for chatting with agents | built; in everyday trial |
-| M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | |
+| M4 | Terminal sessions | Any agent's TUI inside Burrow, attachable from any client | ✅ done |
 | M5 | Flow engine core | YAML flows run durably, with custom steps | |
 | M6 | GitHub and `deliver-issue` | Issue to merged PR, end to end | |
 | M7 | Agent switching | Runs survive usage limits by switching agents | |
@@ -147,23 +147,34 @@ The first passes for Claude Code, Codex and Cursor through `burrowd` and `burrow
 
 Everything above is built and was checked by eye on the merged release build (2026-11-09): the app starts against a `burrowd`, lists sessions, renders a fake session's plan, tool cards, collapsed reads, thoughts and highlighted code, scrolls with "Jump to latest", and replays a real Claude Code session from M2 (answer, shell tool card, approved permission, costs, stopped state) without duplicated text. What remains is the verdict, which only daily use can give.
 
-## M4: Terminal sessions
+## M4: Terminal sessions ✅
 
 - [x] **ConPTY**, called directly through `windows-sys` rather than `portable-pty`: `CreatePseudoConsole`, and `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the program is created inside its kill-on-close Job Object (D-038). **Terminal emulation in `burrowd`** with `alacritty_terminal` 0.26: one emulator per terminal, 10,000 lines of scrollback, fed by a reader thread that never waits for clients (D-039).
 - [x] **Terminal sessions:** `session/create` with `mode: "terminal"` runs Claude Code's, Codex's, Cursor's and Muse's own TUIs, each the program its shim would run, with no `cmd.exe` or PowerShell in between; `burrowd --dev` adds a fake TUI (`burrow-fake-agent --tui`). `terminalOpened`, then `idle` while it runs, then `terminalClosed` with the exit code and `stopped` (code 0, or `session/stop`) or `failed`. Restarts mark them `stopped`.
 - [x] **Terminal methods:** `terminal/attach` (snapshot), `terminal/update` (only what changed, at most every 16 ms per client, with `scrolled` counts and scrollback corrections, the next one only once the previous one is written), `terminal/input`, `terminal/resize`, `terminal/scrollback` (pages at negative indexes, in order with the client's updates), `terminal/detach`, `terminal/closed`; input modes, title and bell (D-039).
-- [ ] **A GPUI terminal view**, drawn from cell runs. *Partial:* the widget is built, against a plain model of the line format (`crates/burrow-app/src/views/terminal/`, D-041, D-042). Phase 2 connects it to `terminal/*` and puts terminal sessions in the session view.
+- [x] **A GPUI terminal view**, drawn from cell runs: the widget (`crates/burrow-app/src/views/terminal/`, D-041, D-042), on a plain model of the line format.
   - **Drawing:** Cascadia Mono (or Consolas), the 256 colours and truecolour with the 16 ANSI colours themed, bold, italic, underline, undercurl, strikethrough, dim, inverse and hidden; wide characters, emoji and combining marks on the grid; the cursor as a block, underline or bar, blinking while focused, hollow when not.
   - **Input:** keys in xterm's encodings, with DECCKM, IME composition and AltGr; Ctrl+Shift+C/V and Ctrl/Shift+Insert for the clipboard, Ctrl+C and Ctrl+V to the program; bracketed paste; SGR and X10 mouse reporting; focus reporting.
   - **Selection** by dragging, double clicks (words) and triple clicks (lines), copied without trailing spaces; **resizing** to whole cells, reported after 80 ms; **scrollback** with the wheel, paged in from the host as the view nears its top.
   - **Checked** with `cargo run -p burrow-app --example terminal_demo`, which runs `pwsh` in ConPTY, emulates it with `alacritty_terminal` and feeds the view the line format: PowerShell's colours, MS Edit full screen, Codex's start screen, selections, the three cursor shapes, a resize and scrollback after it. `--bench` measures drawing.
   - **Measured** on 2026-11-10 (release build, the M3 machine, 125% scale): a 200×60 screen of styled text, 20 runs a line, takes 1.15 ms a frame to lay out and paint with every line new (p95 1.5 ms), and 0.76 ms with one line new or none. The window kept the display's 165 frames a second throughout.
+- [x] **Terminal sessions in the app** (D-043):
+  - **Starting one:** Chat or Terminal on the new session page; Terminal offers each installed agent's TUI, with no model, mode or prompt, and starts it at the size of the session view (`session/create`'s new `cols` and `rows`), titled with the agent's name.
+  - **The session view** shows the terminal in place of the transcript and prompt box, with a status line: running or exited with its code, the size, another client's size when that is in use, and the keys to leave. The header keeps the state, rename, stop, archive and folder, and adds the program's title. The sidebar marks terminal sessions with a terminal icon.
+  - **The connection:** one `TerminalHub` per app attaches, applies the snapshot, routes updates, modes and scrollback pages in order (`burrow-client`'s new `send_in_order`, D-044), and attaches again after a reconnect with a fresh snapshot. A view detaches when dropped; the last few sessions' views stay open, and stay attached.
+  - **Sizes** follow D-040: the client that started the session, or that last typed, follows its window's size; a client that only looks changes nothing.
+  - **The rest:** an exited program's last screen stays readable, selectable and scrollable, with no cursor and no input; the bell flashes the terminal's border; Shift+Esc or a click in the sidebar takes the keyboard back from the terminal, Ctrl+L or a click returns it, and Ctrl+Shift+N, I and O are the app's keys there. Copying joins soft-wrapped lines.
+  - **Protocol, additive:** `Session.terminalId`, `mode` on `SessionSummary` and a session's `entityCreated`, and `session/create`'s `cols` and `rows`.
 - [x] **Decide terminal resize behaviour** when several clients are attached: the latest wins, the client that last resized or typed sets the size (Q7, D-040).
 - [x] **`burrowctl terminal attach | show | send | scrollback`**, and `session new --mode terminal [--attach]`: a second client in any console, with Ctrl+] then `d` to detach.
 - [x] **Tests** (`crates/burrowd/tests/terminals.rs`, the fake TUI on a real pseudo console, no quota): typing and colours; detaching and a second client seeing exactly the current screen; two clients at once; the resize rule; scrollback paging matching what scrolled; narrowing a terminal without duplicated lines; exits with their codes; stopping leaving no processes, `conhost.exe` included; a hard-killed `burrowd`; input modes; a client that stops reading never stalling the terminal or getting a backlog. The emulator's unit tests cover updates, scrolling, resets and paging.
 - [x] **By hand** (2026-11-10, through `burrowctl terminal attach` in a console, against a separate `burrowd`): the first screens of Claude Code 2.1.319 and Cursor 2026.11.05 (their folder-trust questions), Codex 0.167.0 (its main screen) and Muse 1.4.15 (its workspace-trust question), unanswered, with no prompts sent; `session stop` left no process behind for any of them.
+- [x] **The app's test** (`a_terminal_session_runs_through_the_hub` in `crates/burrow-app/src/state/tests.rs`, a real `burrowd --dev` and the fake TUI): created at 100×30, attached, typed into, paged back with scrollback equal to `burrowd`'s, a second client seeing the same screen, detached and attached again to the same screen, resized, re-attached with a fresh snapshot after the connection drops, and closed with its exit code. Unit tests cover the hub's routing, the size rule and the conversion to the view's model.
+- [x] **The app by hand** (2026-11-10, debug build, against a separate `burrowd`): the fake TUI started from the new session page and typed into; `burrowctl terminal attach` in a console showing the same screen, with typing in either showing in both, and the size following whoever typed; `burrowctl` detached, text typed in the app meanwhile, and everything there when it attached again; the bell, leaving the terminal from the sidebar, and an exit with code 3. Then the first screens of Claude Code 2.1.319, Codex 0.167.0, Cursor 2026.11.05 and Muse 1.4.15 in the app, each started at the view's size (122×41), their trust questions unanswered and no prompts sent; stopping each left no process under `burrowd`.
 
 **Done when** any agent's TUI runs inside Burrow, and a second client can detach and attach without losing anything.
+
+✅ Passes (2026-11-10). All four agents' TUIs ran in the desktop app, from its new session page. `burrowctl terminal attach`, as the second client, detached and attached again with nothing lost, while the app kept typing into the session; `a_terminal_session_runs_through_the_hub` checks the same through the app's own hub, and `crates/burrowd/tests/terminals.rs` through `burrowd`.
 
 ## M5: Flow engine core
 

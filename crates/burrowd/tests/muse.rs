@@ -121,6 +121,8 @@ async fn create(client: &Client, cwd: &Path) -> Session {
             cwd: Some(cwd.display().to_string()),
             title: None,
             agent_mode: None,
+            cols: None,
+            rows: None,
         })
         .await
         .expect("session/create")
@@ -492,6 +494,8 @@ async fn muse_approval_modes_are_agent_modes() {
             cwd: Some(workspace.path().display().to_string()),
             title: None,
             agent_mode: Some("allowAll".into()),
+            cols: None,
+            rows: None,
         })
         .await
         .unwrap();

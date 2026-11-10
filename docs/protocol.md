@@ -8,7 +8,7 @@
 > - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
 > - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `agent/install`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
 > - **M3:** `session/rename`, `lastActivityAt` on sessions and on `entityStateChanged`, lists sorted by activity, Muse's approval modes as agent modes, and permission requests the agent withdraws. Then, for the app's controls: the agent on a session's `entityCreated`, the actions on `inboxItemAdded`, and `AgentInfo.agentModes` ([revision notes](#revision-notes)).
-> - **M4:** terminal sessions (`session/create`'s `mode: "terminal"`, `terminalOpened`, `terminalClosed`) and the [terminal methods](#terminals): `terminal/attach`, `detach`, `input`, `resize`, `scrollback`, and the `terminal/update` and `terminal/closed` notifications.
+> - **M4:** terminal sessions (`session/create`'s `mode: "terminal"`, `cols` and `rows`, `terminalOpened`, `terminalClosed`, `Session.terminalId`, the `mode` on summaries and on a session's `entityCreated`) and the [terminal methods](#terminals): `terminal/attach`, `detach`, `input`, `resize`, `scrollback`, and the `terminal/update` and `terminal/closed` notifications.
 >
 > `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
@@ -195,7 +195,7 @@ Lists are built from the `index` stream. A client subscribes once and keeps its 
 
 | `type` | Fields |
 |---|---|
-| `entityCreated` | `entity, id, title?, projectId?, state?, agent?` |
+| `entityCreated` | `entity, id, title?, projectId?, state?, agent?, mode?` |
 | `entityRenamed` | `entity, id, title` |
 | `entityStateChanged` | `entity, id, state, lastActivityAt?` |
 | `entityRemoved` | `entity, id`. The entity left the default lists: a project was removed, or a session or run was archived. |
@@ -204,10 +204,10 @@ Lists are built from the `index` stream. A client subscribes once and keeps its 
 
 What `burrowd` puts on the index, so far:
 - **Projects:** `entityCreated` (with `title`, the project's name) on `project/add`; `entityRemoved` on `project/remove`.
-- **Sessions:** `entityCreated` (with `title` when given, `projectId`, `state: "starting"` and the `agent`) on `session/create`; `entityStateChanged` on every state change, and whenever the session's `lastActivityAt` moves; `entityRenamed` when the first prompt gives the session its title, and on `session/rename`; `entityRemoved` on `session/archive`.
+- **Sessions:** `entityCreated` (with `title` when given, `projectId`, `state: "starting"`, the `agent` and the `mode`, structured or terminal) on `session/create`; `entityStateChanged` on every state change, and whenever the session's `lastActivityAt` moves; `entityRenamed` when the first prompt gives the session its title, and on `session/rename`; `entityRemoved` on `session/archive`.
 - **Inbox:** `inboxItemAdded` for each permission request, with the item's `actions`; `inboxItemResolved` when it is answered or expires.
 
-**A sidebar from the index alone.** A session's `entityCreated` carries its agent, and an item's `inboxItemAdded` its actions, so a new list entry is complete without `session/get` or `inbox/get` (D-035). A client fetches only when they are absent, from an older `burrowd`, and for what the summaries never carry: a project's path, an item's `body` or `form`. A session's `entityStateChanged` always carries its `lastActivityAt` (when a turn last started or ended), so a list sorted like `session/list` re-sorts without a `session/get`. A turn starting or ending almost always changes the state too; the exception is a turn that ends in `limited`, already `limited` since its `limitReached`, which gets an `entityStateChanged` with the same state and the new `lastActivityAt`. A new session's `lastActivityAt` is its `createdAt`, the `at` of its `entityCreated`.
+**A sidebar from the index alone.** A session's `entityCreated` carries its agent and its mode, and an item's `inboxItemAdded` its actions, so a new list entry is complete without `session/get` or `inbox/get` (D-035). A client fetches only when they are absent, from an older `burrowd`, and for what the summaries never carry: a project's path, an item's `body` or `form`. A session's `entityStateChanged` always carries its `lastActivityAt` (when a turn last started or ended), so a list sorted like `session/list` re-sorts without a `session/get`. A turn starting or ending almost always changes the state too; the exception is a turn that ends in `limited`, already `limited` since its `limitReached`, which gets an `entityStateChanged` with the same state and the new `lastActivityAt`. A new session's `lastActivityAt` is its `createdAt`, the `at` of its `entityCreated`.
 
 The summary and the change it summarises are committed together (D-017): a client never sees one without the other.
 
@@ -333,7 +333,7 @@ A session is one conversation with one agent. It is one of two kinds:
 | Method | Params → Result |
 |---|---|
 | `session/list` | `{projectId?, state?, includeArchived?, limit?, before?}` → `SessionSummary[]`, most recent activity first |
-| `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", agentMode?, cwd?, title?}` → `Session`, once the agent is ready |
+| `session/create` | `{projectId?, agent, model?, mode?: "structured" \| "terminal", agentMode?, cwd?, title?, cols?, rows?}` → `Session`, once the agent is ready |
 | `session/get` | `{sessionId}` → `Session` |
 | `session/prompt` | `{sessionId, content: ContentBlock[]}` → `{turnId}`. The output arrives as events. |
 | `session/cancel` | `{sessionId}` → `{}`. Stops the current turn; the session stays open. |
@@ -347,6 +347,7 @@ A session is one conversation with one agent. It is one of two kinds:
 type Session = {
   id: string; projectId?: string; agent: AgentId; model?: string;
   mode: "structured" | "terminal"; cwd: string; title?: string;
+  terminalId?: string;        // a terminal session's terminal, for terminal/attach, once its program started
   state: SessionState;
   reason?: string;            // why it stopped or failed
   turnId?: string;            // the running turn, while working or waiting
@@ -359,8 +360,8 @@ type Session = {
   createdAt: string; updatedAt: string;
   lastActivityAt?: string;    // when a turn last started or ended; createdAt until the first prompt
 };
-type SessionSummary = Pick<Session, "id" | "projectId" | "agent" | "model" | "title" | "state"
-                                  | "archived" | "createdAt" | "updatedAt" | "lastActivityAt">;
+type SessionSummary = Pick<Session, "id" | "projectId" | "agent" | "model" | "mode" | "title"
+                                  | "state" | "archived" | "createdAt" | "updatedAt" | "lastActivityAt">;
 ```
 
 **Session states** (an open enum): `starting`, `idle`, `working`, `waiting` (on a human), `limited` (a provider limit was hit), `stopped`, `failed`.
@@ -392,7 +393,8 @@ Settled in M2:
   - An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable`, and so is Claude Code or Codex before `agent/install` (for structured sessions); a failed start leaves the session `failed`.
 - **Terminal sessions** (`mode: "terminal"`, M4) run the agent's own TUI on a [terminal](#terminals), instead of a protocol adapter: Claude Code's `claude.exe`, Codex's `codex.js`, Cursor's `agent` (run as for ACP, without `acp`), Muse's versioned binary; with `--dev`, agent `fake` runs a fake TUI. `fake-acp` has no terminal mode (`unavailable`).
   - `model` and `agentMode` are `-32602`: they are chosen in the TUI.
-  - `session/create` answers once the program is started, `idle`; the stream has `stateChanged` (`starting`), `terminalOpened` with the terminal's id, then `stateChanged` (`idle`). Clients learn the terminal from `terminalOpened`.
+  - `cols` and `rows` set the terminal's first size, so the TUI draws its first screen at the size the client will show (2–1000 columns, 1–500 rows). They come together or not at all, and only with `mode: "terminal"`; anything else is `-32602`. Without them the terminal starts at 120 × 32.
+  - `session/create` answers once the program is started, `idle`, with the terminal in `terminalId`; the stream has `stateChanged` (`starting`), `terminalOpened` with the terminal's id, then `stateChanged` (`idle`). A client that follows the stream learns the terminal from `terminalOpened`; one that reads the session, from `terminalId`, which stays after the program exits.
   - The session stays `idle` while the TUI runs: Burrow can't see its turns. When the program exits, `terminalClosed` carries its exit code, and the session ends `stopped` for code 0 (reason `the program exited`) or `failed` otherwise (`the program exited with code 3`). `session/stop` and `session/archive` end it too: `terminalClosed` without an exit code, then `stopped`.
   - `session/prompt` is `invalidState` (input goes through `terminal/input`); `session/setModel` and `session/setAgentMode` are `invalidState`; `session/cancel` does nothing.
   - A restart marks it `stopped` like any session, with `terminalClosed` first.
@@ -554,7 +556,7 @@ So the client's copy of the screen, and of every scrollback line it has seen scr
 
 **Input.** `data` is UTF-8 text with escape sequences for special keys, encoded for the current `modes`: arrows as `ESC [ A`, or `ESC O A` with `appCursor`; Enter as `\r`; pastes wrapped when `bracketedPaste` is on; mouse reports when `mouse` asks for them. Burrow doesn't offer the kitty keyboard protocol, so programs use these legacy encodings. Input is written to the program in the order requests arrive on a connection; `burrowd` handles `terminal/input`, `terminal/resize`, `terminal/attach` and `terminal/detach` in order, before reading the connection's next line. Input waiting for a program that doesn't read it is capped at 1 MiB, beyond which `terminal/input` is `invalidState`; so is input to a terminal whose program has exited.
 
-**Size (Q7, D-040): the latest wins.** A terminal starts at 120 × 32. `terminal/resize` sets its size (2–1000 columns, 1–500 rows, else `-32602`), and the connection remembers it as what that client wants. When an attached client sends `terminal/input` and last asked for a size other than the terminal's, the terminal takes that size first. So whoever types gets their size, and the others draw the grid at it: every client gets the `reset` update. Attaching changes nothing, and a client that never resized types without changing the size.
+**Size (Q7, D-040): the latest wins.** A terminal starts at the size `session/create` gave, else 120 × 32. `terminal/resize` sets its size (2–1000 columns, 1–500 rows, else `-32602`), and the connection remembers it as what that client wants. When an attached client sends `terminal/input` and last asked for a size other than the terminal's, the terminal takes that size first. So whoever types gets their size, and the others draw the grid at it: every client gets the `reset` update. Attaching changes nothing, and a client that never resized types without changing the size.
 
 **Lifecycle.**
 - **Attaching** twice on one connection is `invalidState`; detach first. An unknown terminal is `notFound`. Detaching a terminal that isn't attached does nothing.
@@ -836,12 +838,16 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **Updates scroll:** an update says how many lines scrolled (`scrolled`) and the client moves its rows first, then applies the lines that differ, scrollback corrections included; a `reset` replaces everything after a resize. Clients keep an exact copy of the scrollback that scrolled past them.
 - **Q7 settled:** the terminal takes the size of the client that last resized or typed (D-040).
 
+**2026-11-10, terminal sessions in the desktop app (M4).** Additive; the schema is regenerated:
+- **`session/create` gained `cols?` and `rows?`:** a terminal session's first size, so the TUI's first screen fits the client. This settles the open question about a terminal's first size.
+- **`Session` gained `terminalId?`:** a terminal session's terminal, so a client that reads the session can attach without replaying its stream.
+- **`SessionSummary` gained `mode`,** and a session's **`entityCreated` gained `mode?`,** so a list can mark terminal sessions without `session/get`. A summary from an older `burrowd` has no `mode`, which reads as structured.
+
 ## Open questions
 
 - **Resuming sessions:** a `stopped` session can't be continued yet. ACP's `session/load` could resume one in a new agent process; how that shows in the stream (a new state, or `starting` again) is open.
 - **Usage history:** `usage/get` is kept in memory only, so a restart forgets reported limits. Flows that wait for a limit to reset (M7) will need it stored.
 - **Terminal colours:** programs that ask for the terminal's colours (OSC 10, 11) get a fixed dark palette. Clients could tell `burrowd` their theme on `terminal/attach`.
-- **A terminal's first size:** a terminal starts at 120 × 32, and the first client resizes it. `session/create` could take the size, so the TUI draws its first screen at it.
 - **More of the terminal:** the clipboard (OSC 52), hyperlinks (OSC 8), underline colours and the kitty keyboard protocol aren't passed on yet.
 - **Log compaction:** whether to fold a turn's message chunks into one message once the turn completes. Clients would need to handle `reset`.
 - **Remote media:** whether remote connections need a binary side channel for media instead of base64 chunks.

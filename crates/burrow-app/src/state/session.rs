@@ -12,7 +12,8 @@ use std::ops::Range;
 
 use burrow_protocol::methods::SessionGet;
 use burrow_protocol::{
-    Event, Session, SessionIdParams, SessionState, SessionUsage, StreamEvent, StreamName,
+    Event, Session, SessionIdParams, SessionMode, SessionState, SessionUsage, StreamEvent,
+    StreamName,
 };
 use gpui::{Context, EventEmitter, Task};
 
@@ -30,6 +31,10 @@ pub struct SessionLog {
     turn_usage: Option<(String, SessionUsage)>,
     /// The latest turn started, from its `userMessage`.
     latest_turn: Option<String>,
+    /// A terminal session's terminal, from its `terminalOpened`.
+    terminal: Option<String>,
+    /// How its program ended, from `terminalClosed`: the exit code, if it had one.
+    terminal_exit: Option<Option<i32>>,
 }
 
 impl SessionLog {
@@ -70,12 +75,16 @@ impl SessionLog {
         self.event_usage = None;
         self.turn_usage = None;
         self.latest_turn = None;
+        self.terminal_exit = None;
         self.seq = head;
     }
 
     fn apply(&mut self, event: &StreamEvent) {
-        if let Event::UserMessage(message) = &event.event {
-            self.latest_turn = Some(message.turn_id.clone());
+        match &event.event {
+            Event::UserMessage(message) => self.latest_turn = Some(message.turn_id.clone()),
+            Event::TerminalOpened(opened) => self.terminal = Some(opened.terminal_id.clone()),
+            Event::TerminalClosed(closed) => self.terminal_exit = Some(closed.exit_code),
+            _ => {}
         }
         if let Event::Usage(usage) = &event.event {
             add_usage(
@@ -107,6 +116,7 @@ impl SessionLog {
                 }
             }
             Event::ModelChanged(changed) => session.model = Some(changed.model.clone()),
+            Event::TerminalOpened(opened) => session.terminal_id = Some(opened.terminal_id.clone()),
             Event::AgentModeChanged(changed) => {
                 session.agent_mode = Some(changed.agent_mode.clone())
             }
@@ -154,6 +164,27 @@ impl SessionLog {
             }
             _ => None,
         })
+    }
+
+    /// Whether this is a terminal session, once `session/get` answered.
+    pub fn is_terminal(&self) -> Option<bool> {
+        self.session
+            .as_ref()
+            .map(|session| session.mode == SessionMode::Terminal)
+    }
+
+    /// A terminal session's terminal, once its program has started: `Session.terminalId`, or
+    /// what its stream announced.
+    pub fn terminal_id(&self) -> Option<&str> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.terminal_id.as_deref())
+            .or(self.terminal.as_deref())
+    }
+
+    /// How a terminal session's program ended, once it has: its exit code, if it had one.
+    pub fn terminal_exit(&self) -> Option<Option<i32>> {
+        self.terminal_exit
     }
 
     /// The current state, or `starting` before anything is known.
@@ -322,7 +353,7 @@ impl SessionStore {
 mod tests {
     use burrow_protocol::{
         AgentId, AgentMessageChunk, LimitReached, ModelChanged, SessionMode, StateChanged,
-        Timestamp, TurnEndReason, TurnEnded, Usage, UserMessage,
+        TerminalClosed, TerminalOpened, Timestamp, TurnEndReason, TurnEnded, Usage, UserMessage,
     };
 
     use super::*;
@@ -347,6 +378,7 @@ mod tests {
             agent: AgentId::Fake,
             model: Some("fake".into()),
             mode: SessionMode::Structured,
+            terminal_id: None,
             cwd: "D:\\repo".into(),
             title: None,
             state: SessionState::Idle,
@@ -526,6 +558,43 @@ mod tests {
         // A newer turn that reports nothing (yet) shows no turn figures, not the last ones.
         log.push([ev(7, prompt("trn_3", &["third"]))]);
         assert!(log.turn_usage().is_none());
+    }
+
+    #[test]
+    fn a_terminal_session_names_its_terminal_and_how_it_ended() {
+        let mut log = SessionLog::new();
+        log.set_session(Session {
+            mode: SessionMode::Terminal,
+            model: None,
+            ..session()
+        });
+        assert_eq!(log.is_terminal(), Some(true));
+        assert_eq!(log.terminal_id(), None);
+        log.push([
+            ev(
+                1,
+                TerminalOpened {
+                    terminal_id: "trm_1".into(),
+                },
+            ),
+            ev(2, state("idle")),
+        ]);
+        assert_eq!(log.terminal_id(), Some("trm_1"));
+        assert_eq!(log.session().unwrap().terminal_id.as_deref(), Some("trm_1"));
+        assert_eq!(log.terminal_exit(), None);
+        log.push([
+            ev(
+                3,
+                TerminalClosed {
+                    terminal_id: "trm_1".into(),
+                    exit_code: Some(3),
+                },
+            ),
+            ev(4, state("failed")),
+        ]);
+        assert_eq!(log.terminal_exit(), Some(Some(3)));
+        // A structured session isn't one; before `session/get` nobody knows.
+        assert_eq!(SessionLog::new().is_terminal(), None);
     }
 
     #[test]

@@ -1,24 +1,32 @@
 //! [`AppState`] and [`SessionStore`] against real pipes.
 //!
-//! The reconnect test runs the `burrowd` and `burrow-fake-agent` that `cargo build --workspace`
-//! put next to the test executable's folder, on a pipe and data folder of its own. Without them
-//! it says so and passes.
+//! The reconnect and terminal tests run the `burrowd` and `burrow-fake-agent` that
+//! `cargo build --workspace` put next to the test executable's folder, on a pipe and data folder
+//! of their own. Without them they say so and pass.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use burrow_client::{Client, ConnectOptions};
-use burrow_protocol::methods::{ProjectAdd, SessionCreate, SessionPrompt};
+use burrow_protocol::methods::{
+    ProjectAdd, SessionCreate, SessionPrompt, TerminalAttach, TerminalScrollback,
+};
 use burrow_protocol::{
     AgentId, ClientInfo, ClientKind, ContentBlock, Event, ProjectAddParams, SessionCreateParams,
-    SessionPromptParams, SessionState,
+    SessionMode, SessionPromptParams, SessionState, TerminalIdParams, TerminalScrollbackParams,
+    TerminalSize,
 };
 use gpui::{Entity, TestAppContext};
 
 use super::session::SessionStore;
+use super::terminals::{Key, TerminalHub, TerminalMessage};
 use super::*;
 use crate::backend::BackendConfig;
+use crate::views::session::terminal::convert;
+use crate::views::terminal::grid::TerminalGrid;
 
 fn unique_pipe(tag: &str) -> String {
     format!(
@@ -160,6 +168,8 @@ fn lists_and_streams_survive_a_burrowd_restart(cx: &mut TestAppContext) {
                 agent_mode: None,
                 cwd: None,
                 title: None,
+                cols: None,
+                rows: None,
             })
             .await
             .unwrap();
@@ -226,4 +236,229 @@ fn lists_and_streams_survive_a_burrowd_restart(cx: &mut TestAppContext) {
     });
     assert!(state.read_with(cx, |s, _| s.index().seq()) > index_seq_before);
     daemon.kill();
+}
+
+/// What a terminal's sink was told, applied to the terminal view's plain model as the session
+/// view applies it.
+#[derive(Default)]
+struct Seen {
+    grid: Option<TerminalGrid>,
+    snapshots: usize,
+    disconnects: usize,
+    closed: Option<Option<i32>>,
+    failed: Option<String>,
+    history_complete: bool,
+}
+
+impl Seen {
+    fn apply(&mut self, message: TerminalMessage) {
+        match message {
+            TerminalMessage::Snapshot(snapshot) => {
+                let mut grid = TerminalGrid::new(1, 1);
+                grid.apply_snapshot(convert::snapshot(snapshot));
+                self.grid = Some(grid);
+                self.snapshots += 1;
+            }
+            TerminalMessage::Update(update) => {
+                let grid = self.grid.as_mut().expect("an update before the snapshot");
+                match convert::reset(&update) {
+                    Some(snapshot) => {
+                        grid.apply_snapshot(snapshot);
+                    }
+                    None => {
+                        grid.apply_update(convert::update(update));
+                    }
+                }
+            }
+            TerminalMessage::History { lines, complete } => {
+                let grid = self.grid.as_mut().expect("history before the snapshot");
+                grid.apply_history(lines.into_iter().map(convert::line).collect(), complete);
+                self.history_complete = complete;
+            }
+            TerminalMessage::Closed { exit_code } => self.closed = Some(exit_code),
+            TerminalMessage::Disconnected => self.disconnects += 1,
+            TerminalMessage::Failed(message) => self.failed = Some(message),
+        }
+    }
+
+    fn screen(&self) -> Vec<String> {
+        let Some(grid) = &self.grid else {
+            return Vec::new();
+        };
+        (0..i64::from(grid.rows()))
+            .map(|row| grid.line(row).map(|line| line.text()).unwrap_or_default())
+            .collect()
+    }
+
+    fn size(&self) -> Option<(u16, u16)> {
+        self.grid.as_ref().map(|grid| (grid.cols(), grid.rows()))
+    }
+
+    /// The fake TUI's status line, on the last row.
+    fn status(&self) -> String {
+        self.screen().last().cloned().unwrap_or_default()
+    }
+}
+
+/// Attaches `terminal` through the hub, applying what arrives to a [`Seen`].
+fn attach_seen(
+    cx: &mut TestAppContext,
+    hub: &Entity<TerminalHub>,
+    terminal: &str,
+) -> (Rc<RefCell<Seen>>, Key) {
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let sink = seen.clone();
+    let key = hub.update(cx, |hub, _| {
+        hub.attach(terminal, move |message, _| sink.borrow_mut().apply(message))
+    });
+    (seen, key)
+}
+
+/// M4's "done when", through the app's own path: a terminal session started at a size, typed
+/// into, paged back, watched by a second client, detached and attached again to the same screen,
+/// resized, reconnected, and ended.
+#[gpui::test]
+fn a_terminal_session_runs_through_the_hub(cx: &mut TestAppContext) {
+    let Some(burrowd) = built_burrowd() else {
+        eprintln!("skipped: no burrowd.exe next to the tests; run `cargo build --workspace` first");
+        return;
+    };
+    cx.executor().allow_parking();
+    let pipe = unique_pipe("terminal");
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _daemon = Daemon::start(&burrowd, &pipe, data.path());
+
+    install_backend(cx, &pipe);
+    let state = cx.new(AppState::new);
+    wait_until(cx, "the connection", |cx| status(cx, &state).is_connected());
+    let hub = state.read_with(cx, |state, _| state.terminals().clone());
+
+    // A terminal session, at the size a client asks for.
+    let runtime = burrow_client::io_runtime().unwrap();
+    let other = runtime.block_on(async {
+        let info = ClientInfo {
+            name: "test".into(),
+            version: "0".into(),
+            kind: ClientKind::Cli,
+        };
+        Client::connect(ConnectOptions::new(info).pipe(pipe.clone()))
+            .await
+            .unwrap()
+    });
+    let session = runtime
+        .block_on(other.call::<SessionCreate>(&SessionCreateParams {
+            mode: SessionMode::Terminal,
+            cols: Some(100),
+            rows: Some(30),
+            ..SessionCreateParams::new(AgentId::Fake, dir.path().to_string_lossy())
+        }))
+        .unwrap();
+    let terminal = session.terminal_id.clone().expect("Session.terminalId");
+
+    // Attach: the first screen, at that size.
+    let (seen, key) = attach_seen(cx, &hub, &terminal);
+    wait_until(cx, "the first screen", |_| {
+        seen.borrow().status().starts_with("status 100x30")
+    });
+    assert_eq!(seen.borrow().size(), Some((100, 30)));
+    assert!(seen.borrow().screen()[0].starts_with("fake tui"));
+    assert!(hub.read_with(cx, |hub, _| hub.is_attached(&terminal, key)));
+
+    // Type, and see the screen change.
+    let input = |cx: &mut TestAppContext, data: &str| {
+        hub.read_with(cx, |hub, cx| hub.input(&terminal, data.into(), cx))
+    };
+    input(cx, "hello");
+    wait_until(cx, "the echo", |_| seen.borrow().screen()[1] == "> hello");
+    input(cx, "\r/flood 60\r");
+    wait_until(cx, "the flood", |_| {
+        seen.borrow().screen().iter().any(|row| row == "line 60")
+    });
+    // Page the scrollback in: it is what scrolled off, as burrowd keeps it.
+    assert!(hub.update(cx, |hub, _| hub.scrollback(&terminal, key, 0, 1000)));
+    wait_until(cx, "the scrollback", |_| seen.borrow().history_complete);
+    let kept: Vec<String> = runtime
+        .block_on(other.call::<TerminalScrollback>(&TerminalScrollbackParams {
+            terminal_id: terminal.clone(),
+            before: None,
+            limit: Some(1000),
+        }))
+        .unwrap()
+        .lines
+        .iter()
+        .map(|line| line.text())
+        .collect();
+    {
+        let seen = seen.borrow();
+        let grid = seen.grid.as_ref().unwrap();
+        let history: Vec<String> = (1..=grid.history_len() as i64)
+            .rev()
+            .map(|n| grid.line(-n).unwrap().text())
+            .collect();
+        assert_eq!(history, kept);
+        for line in ["fake tui red orange inverse 漢字", "echo: hello", "line 1"] {
+            assert!(history.contains(&line.to_owned()), "{line}: {history:?}");
+        }
+    }
+
+    // A second client sees the same screen.
+    let theirs = runtime
+        .block_on(other.call::<TerminalAttach>(&TerminalIdParams {
+            terminal_id: terminal.clone(),
+        }))
+        .unwrap();
+    let mut grid = TerminalGrid::new(1, 1);
+    grid.apply_snapshot(convert::snapshot(theirs));
+    let their_screen: Vec<String> = (0..30).map(|row| grid.line(row).unwrap().text()).collect();
+    assert_eq!(their_screen, seen.borrow().screen());
+
+    // Detach and attach again: exactly the same screen.
+    let before = seen.borrow().screen();
+    hub.update(cx, |hub, _| hub.detach(&terminal, key));
+    let (seen, key) = attach_seen(cx, &hub, &terminal);
+    wait_until(cx, "the snapshot after attaching again", |_| {
+        seen.borrow().snapshots == 1
+    });
+    assert_eq!(seen.borrow().screen(), before);
+
+    // Resize: the program redraws at the new size.
+    hub.read_with(cx, |hub, cx| {
+        hub.resize(&terminal, TerminalSize { cols: 80, rows: 24 }, cx)
+    });
+    wait_until(cx, "the resize", |_| {
+        let seen = seen.borrow();
+        seen.size() == Some((80, 24)) && seen.status().starts_with("status 80x24")
+    });
+
+    // The connection drops while burrowd runs on: the hub attaches again, with a fresh snapshot.
+    let before = seen.borrow().screen();
+    cx.update(|cx| Backend::global(cx).client().unwrap().close());
+    wait_until(cx, "the attachment after the reconnect", |cx| {
+        let seen = seen.borrow();
+        seen.disconnects == 1
+            && seen.snapshots == 2
+            && hub.read_with(cx, |hub, _| hub.is_attached(&terminal, key))
+    });
+    assert_eq!(seen.borrow().screen(), before);
+    // (The status line now covers the prompt's row, so the answer shows that typing arrived.)
+    input(cx, "after\r");
+    wait_until(cx, "typing after the reconnect", |_| {
+        seen.borrow()
+            .screen()
+            .iter()
+            .any(|row| row == "echo: after")
+    });
+
+    // The program exits: its code arrives, and the last screen stays.
+    input(cx, "/exit 3\r");
+    wait_until(cx, "the exit", |_| seen.borrow().closed.is_some());
+    assert_eq!(seen.borrow().closed, Some(Some(3)));
+    assert!(
+        seen.borrow()
+            .screen()
+            .iter()
+            .any(|row| row.contains("echo: after"))
+    );
+    assert!(seen.borrow().failed.is_none());
 }

@@ -46,9 +46,11 @@ Every decision that shapes the architecture gets an entry here.
 | [D-037](#d-037-the-app-starts-burrowd-under-the-desktop-shell-out-of-its-own-process-tree) | The app starts `burrowd` under the desktop shell, out of its own process tree | 2026-11-09 | accepted; amends D-029's launch |
 | [D-038](#d-038-terminal-sessions-run-on-conpty-called-directly-and-are-created-inside-their-job-object) | Terminal sessions run on ConPTY, called directly, and are created inside their Job Object | 2026-11-10 | accepted |
 | [D-039](#d-039-terminals-are-emulated-in-burrowd-and-each-client-gets-paced-updates-that-scroll-its-copy) | Terminals are emulated in `burrowd`, and each client gets paced updates that scroll its copy | 2026-11-10 | accepted |
-| [D-040](#d-040-a-terminal-takes-the-size-of-the-client-that-last-resized-or-typed) | A terminal takes the size of the client that last resized or typed | 2026-11-10 | accepted |
+| [D-040](#d-040-a-terminal-takes-the-size-of-the-client-that-last-resized-or-typed) | A terminal takes the size of the client that last resized or typed | 2026-11-10 | accepted; its last consequence amended by D-043 |
 | [D-041](#d-041-the-terminal-view-sends-xterms-encodings-keeps-ctrlshiftc-and-v-for-the-clipboard-and-gives-a-focused-terminal-the-apps-keys) | The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys | 2026-11-10 | accepted |
-| [D-042](#d-042-the-terminal-view-paints-a-glyph-per-cell-from-line-layouts-cached-by-version-in-one-paint-layer-per-row) | The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row | 2026-11-10 | accepted |
+| [D-042](#d-042-the-terminal-view-paints-a-glyph-per-cell-from-line-layouts-cached-by-version-in-one-paint-layer-per-row) | The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row | 2026-11-10 | accepted; its last consequence amended by D-043 |
+| [D-043](#d-043-in-the-app-the-client-that-starts-a-terminal-session-sizes-it-open-views-stay-attached-and-the-keyboard-can-always-leave) | In the app, the client that starts a terminal session sizes it, open views stay attached, and the keyboard can always leave | 2026-11-10 | accepted; amends D-040's and D-042's last consequences |
+| [D-044](#d-044-burrow-client-can-deliver-an-answer-among-the-notifications-in-the-order-burrowd-sent-it) | `burrow-client` can deliver an answer among the notifications, in the order `burrowd` sent it | 2026-11-10 | accepted |
 
 ---
 
@@ -1050,3 +1052,55 @@ This amends D-029's launch, which tried only the last two.
 - A fallback glyph wider than its cells, such as some emoji, overlaps the next cell, as in other terminals.
 - The host has to report how many lines scrolled into scrollback with each update, or scrolled-off lines are lost to the view until it asks for history again.
 - The line format has no soft-wrap flag, so copying a long line that wrapped puts a line break where it wrapped.
+
+## D-043 In the app, the client that starts a terminal session sizes it, open views stay attached, and the keyboard can always leave
+
+**Decision.**
+- **Starting one.** The new session page offers Chat or Terminal. Terminal offers every installed agent, hides the model, the agent mode and the prompt, and sends the grid that fits the session view as `session/create`'s new `cols` and `rows`. The session is titled with the agent's name, since no first prompt will title it.
+- **One hub.** `state::terminals::TerminalHub` is the app's one reader of the connection's notifications. A view registers a terminal with a sink; the hub attaches, delivers the snapshot, the updates, the scrollback pages and the close in the order `burrowd` sent them (D-044), and attaches again with a fresh snapshot after every reconnect. An update reaches only the registration whose attach answer came before it.
+- **Open views stay attached.** The workspace keeps the last 5 sessions' views (D-036). A terminal session's view keeps its attachment while it is kept, and detaches when it is dropped.
+- **Sizes, under D-040** (`state::terminals::Sizing`):
+  - the client that started the session holds the size: when its window resizes, the terminal follows at once;
+  - any other client holds it only once its user types there; until then it draws the grid at the other client's size, and the status line says so;
+  - a `reset` to a size this client didn't ask for ends its hold.
+- **The keyboard can always leave.** Shift+Esc, or a click anywhere in the sidebar, gives the keyboard back to the app; Ctrl+L, or a click in the terminal, returns it. In the terminal, the app's Ctrl+N, Ctrl+I and Ctrl+O are Ctrl+Shift+N, I and O. The status line shows these keys while the terminal has focus.
+- **When the program exits** the view is disabled: no cursor, no input, no mouse reports. The last screen stays readable, selectable and scrollable. The status line gives the exit code, or why the session ended; the header shows no reason line for terminal sessions.
+- **The bell** flashes a thin border around the terminal for 180 ms.
+- **Copying** joins soft-wrapped lines, from the line format's `wrapped`.
+
+**Why.**
+- **The first screen at the right size.** Without a size, a TUI draws its first screen at 120 × 32, then again when the view resizes it. The new session page knows the view's size before the session exists. Checked by hand: all four agents' TUIs started at the view's 122 × 41.
+- **Who holds the size.** Whoever started the session from this window is the one looking at it, so resizing the window should resize the terminal, as in any terminal. Opening a session someone else is using must not reflow their screen until it is used here (D-040's reasoning).
+- **Kept attached.** Attaching again on every switch costs a snapshot, and loses the scrollback the view had paged in. A kept terminal that isn't shown costs only its updates, about 60 a second at most, applied to its model and not drawn.
+- **Shift for the app's keys.** D-041 gave Ctrl+N, Ctrl+L, Ctrl+I, Ctrl+O and Esc to the program, so a focused terminal had no way out by keyboard. xterm's encodings have no Shift for Esc or Ctrl+letter, so a program can't tell Shift+Esc from Esc or Ctrl+Shift+N from Ctrl+N, and loses nothing when the app takes the Shift forms. Windows Terminal takes Ctrl+Shift for its own keys the same way.
+- **The exit in the status line.** Found by eye: the header's reason line grew the header by a line when the program exited, which cut the terminal's bottom row off its last screen.
+
+**Alternatives considered.**
+- **Detaching views that aren't shown:** each switch would attach again and drop the scrollback paged in.
+- **Every client following its own window:** opening a session on a second client would reflow it for the first.
+- **A key the app owns outright** (an F-key, or Ctrl+Alt): programs use those; Shift+Esc reaches a program as nothing it could tell apart.
+- **Hiding an exited terminal behind a notice:** its last screen often says why it exited.
+
+**Consequences.**
+- `session/create` takes `cols` and `rows` (additive, protocol.md's revision notes), so D-040's last consequence no longer holds. Copying joins soft-wrapped lines, so D-042's last one no longer holds either.
+- A grid larger than the view, another client's size, is cut off at the bottom and right until the user types here.
+- `AgentInfo` doesn't say which agents have a TUI, so Terminal offers the dev-only fake ACP agent too; `session/create` refuses it, and the page shows "has no terminal mode".
+- An app key added later that programs need goes in two places: the terminal's `NoAction` bindings (`views/terminal/mod.rs`), and a Shift form in `actions.rs`.
+
+## D-044 `burrow-client` can deliver an answer among the notifications, in the order `burrowd` sent it
+
+**Decision.** `Client::send_in_order::<M>(params)` sends a request whose answer goes, not to a waiting caller, but onto the connection's notification channel as `Incoming::Answer`, in the order the reader received it. `Notifications::next` and the `Stream` still yield only notifications; `next_incoming` yields both. The app's terminal hub sends `terminal/attach`, `terminal/detach` and `terminal/scrollback` this way. Input and resizes stay plain calls.
+
+**Why.**
+- `burrowd` answers a terminal's attach before the updates that follow the snapshot, and a scrollback page after exactly the updates it agrees with (D-039).
+- `burrow-client` gave each call's answer its own channel and the notifications another, so that order was lost: a caller woken by its answer can run before or after notifications that came in behind it. A snapshot applied after its first update would undo that update; a page applied before an update's `scrolled` would be off by that many lines.
+
+**Alternatives considered.**
+- **Sequence numbers on `terminal/update` and in the answers:** a protocol change, for an order the pipe already keeps.
+- **Holding updates in the app until the answer arrives:** the app can't tell which updates came before the answer and which after.
+- **One channel for everything:** every caller would have to dispatch answers itself.
+
+**Consequences.**
+- Someone must read the notifications, or such answers are dropped. There is one reader per connection; in the app, that is the hub.
+- An answer sent this way has no `PendingCall`, so it can't be cancelled with `$/cancel`.
+- `burrowctl terminal attach` keeps plain calls: it reads no notification until it has its snapshot, so nothing can overtake it.
