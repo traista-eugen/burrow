@@ -47,6 +47,10 @@
 //!   (`set_model`, `set_agent_mode`, `rename`, `stop`, `archive`, `cancel`).
 //! - **Prompt box** (`session/prompt.rs`): reads the state and [`SessionLog::prompts`] for its
 //!   history; sends through [`AppState::prompt`].
+//! - **Terminal** (`terminal/`, M4): [`terminal::TerminalView`] draws a terminal `burrowd`
+//!   emulates. It isn't in the layout yet; M4's phase 2 shows it for terminal-mode sessions. Its
+//!   interface (snapshots and updates in, input, resizes and history requests out) is described
+//!   in `terminal/mod.rs`.
 //! - Shared state lives in [`crate::state`]; views keep only view state (selection, scroll,
 //!   focus).
 //!
@@ -67,6 +71,9 @@ pub mod inbox;
 pub mod new_session;
 pub mod session;
 pub mod sidebar;
+// The session view uses it from M4's phase 2; until then only its tests and the demo do.
+#[allow(dead_code)]
+pub mod terminal;
 pub mod workspace;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

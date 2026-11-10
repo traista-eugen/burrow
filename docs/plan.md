@@ -151,7 +151,12 @@ Everything above is built and was checked by eye on the merged release build (20
 
 - [ ] **ConPTY** through `portable-pty`. Terminal emulation in `burrowd` with `alacritty_terminal`.
 - [ ] **Terminal methods:** `terminal/attach` (snapshot), `terminal/update` (changed lines only), `terminal/input` and `terminal/resize`.
-- [ ] **A GPUI terminal view**, drawn from cell runs.
+- [ ] **A GPUI terminal view**, drawn from cell runs. *Partial:* the widget is built, against a plain model of the line format (`crates/burrow-app/src/views/terminal/`, D-041, D-042). Phase 2 connects it to `terminal/*` and puts terminal sessions in the session view.
+  - **Drawing:** Cascadia Mono (or Consolas), the 256 colours and truecolour with the 16 ANSI colours themed, bold, italic, underline, undercurl, strikethrough, dim, inverse and hidden; wide characters, emoji and combining marks on the grid; the cursor as a block, underline or bar, blinking while focused, hollow when not.
+  - **Input:** keys in xterm's encodings, with DECCKM, IME composition and AltGr; Ctrl+Shift+C/V and Ctrl/Shift+Insert for the clipboard, Ctrl+C and Ctrl+V to the program; bracketed paste; SGR and X10 mouse reporting; focus reporting.
+  - **Selection** by dragging, double clicks (words) and triple clicks (lines), copied without trailing spaces; **resizing** to whole cells, reported after 80 ms; **scrollback** with the wheel, paged in from the host as the view nears its top.
+  - **Checked** with `cargo run -p burrow-app --example terminal_demo`, which runs `pwsh` in ConPTY, emulates it with `alacritty_terminal` and feeds the view the line format: PowerShell's colours, MS Edit full screen, Codex's start screen, selections, the three cursor shapes, a resize and scrollback after it. `--bench` measures drawing.
+  - **Measured** on 2026-11-10 (release build, the M3 machine, 125% scale): a 200×60 screen of styled text, 20 runs a line, takes 1.15 ms a frame to lay out and paint with every line new (p95 1.5 ms), and 0.76 ms with one line new or none. The window kept the display's 165 frames a second throughout.
 - [ ] **Decide terminal resize behaviour** when several clients are attached (open question in `protocol.md`).
 
 **Done when** any agent's TUI runs inside Burrow, and a second client can detach and attach without losing anything.

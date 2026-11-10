@@ -28,6 +28,8 @@ similar.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The terminal view's cell widths.
+unicode-width.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -43,6 +45,9 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# `examples/terminal_demo.rs`: a local shell in ConPTY, emulated, drawn by the terminal view.
+alacritty_terminal.workspace = true
+portable-pty.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # For checking where `burrowd` lands when the app's Job Object forbids breaking away (D-037).
