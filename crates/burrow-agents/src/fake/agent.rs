@@ -22,7 +22,8 @@
 //! | `/crash` | Exits at once with code 3 |
 //!
 //! With `--model fake-slow-start` it waits a minute before announcing `ready`, for testing a
-//! cancelled `session/create`. When stdin closes it exits; its child is left to the Job Object.
+//! cancelled `session/create`. With `--tui` it is the fake TUI instead ([`super::tui`]), which
+//! agent `fake` runs in terminal sessions. When stdin closes it exits; its child is left to the Job Object.
 
 use std::io::{self, BufRead, Write};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -64,6 +65,7 @@ pub fn main() -> ExitCode {
                 thread::sleep(SLEEPER_LIFETIME);
                 return ExitCode::SUCCESS;
             }
+            "--tui" => return super::tui::main(),
             "--model" => {
                 if let Some(value) = args.next() {
                     model = value;
@@ -124,7 +126,7 @@ pub fn main() -> ExitCode {
 
 /// Starts this program again as `--sleeper`: a child that just waits, so the session has a
 /// process tree. It is deliberately not cleaned up here; the Job Object must do that.
-fn spawn_sleeper() -> Option<Child> {
+pub(super) fn spawn_sleeper() -> Option<Child> {
     let exe = std::env::current_exe().ok()?;
     let mut command = Command::new(exe);
     command

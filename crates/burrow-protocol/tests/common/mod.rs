@@ -221,6 +221,71 @@ pub fn samples() -> Vec<Sample> {
             json!({"type": "stateChanged", "state": "stopped", "reason": "burrowd restarted"}),
         ],
         "TerminalOpened": Event => [json!({"type": "terminalOpened", "terminalId": "trm_1"})],
+        "TerminalClosed": Event => [
+            json!({"type": "terminalClosed", "terminalId": "trm_1", "exitCode": 0}),
+            json!({"type": "terminalClosed", "terminalId": "trm_1"}),
+        ],
+        "Color": Color => [json!(0), json!(15), json!(255), json!("#1e1e2e")],
+        "CursorShape": CursorShape => [json!("block"), json!("underline"), json!("bar"), json!("hollow")],
+        "MouseTracking": MouseTracking => [json!("click"), json!("drag"), json!("motion"), json!("pixels")],
+        "TerminalRun": TerminalRun => [
+            json!({"text": "plain"}),
+            json!({"text": "漢字 ok", "fg": 2, "bg": "#202020", "flags": 5}),
+        ],
+        "TerminalLine": TerminalLine => [
+            json!({"index": 0, "runs": []}),
+            json!({"index": -12_345, "runs": [{"text": "$ "}, {"text": "cargo", "fg": 10, "flags": 1}], "wrapped": true}),
+        ],
+        "TerminalCursor": TerminalCursor => [
+            json!({"row": 0, "col": 0, "visible": true, "shape": "block"}),
+            json!({"row": 23, "col": 79, "visible": false, "shape": "bar"}),
+        ],
+        "TerminalModes": TerminalModes => [
+            json!({}),
+            json!({"appCursor": true, "appKeypad": true, "bracketedPaste": true, "mouse": "motion",
+                   "mouseSgr": true, "focusEvents": true, "altScreen": true, "alternateScroll": true}),
+        ],
+        "TerminalExit": TerminalExit => [json!({}), json!({"exitCode": 1})],
+        "TerminalIdParams": TerminalIdParams => [json!({"terminalId": "trm_1"})],
+        "TerminalSnapshot": TerminalSnapshot => [
+            json!({"terminalId": "trm_1", "cols": 4, "rows": 2,
+                   "cursor": {"row": 1, "col": 2, "visible": true, "shape": "block"},
+                   "lines": [{"index": 0, "runs": [{"text": "hi", "fg": 1}]}, {"index": 1, "runs": [{"text": "$ "}]}],
+                   "modes": {"bracketedPaste": true}, "title": "fake", "scrollback": 30}),
+            json!({"terminalId": "trm_1", "cols": 2, "rows": 1,
+                   "cursor": {"row": 0, "col": 0, "visible": false, "shape": "underline"},
+                   "lines": [{"index": 0, "runs": []}], "modes": {}, "scrollback": 0,
+                   "exit": {"exitCode": 0}}),
+        ],
+        "TerminalUpdate": TerminalUpdate => [
+            json!({"terminalId": "trm_1", "lines": [{"index": 3, "runs": [{"text": "x"}]}],
+                   "cursor": {"row": 3, "col": 1, "visible": true, "shape": "block"}}),
+            json!({"terminalId": "trm_1", "scrolled": 2,
+                   "lines": [{"index": -1, "runs": [{"text": "changed before it left"}]}, {"index": 23, "runs": []}],
+                   "cursor": {"row": 23, "col": 0, "visible": true, "shape": "block"}, "scrollback": 970, "bell": true}),
+            json!({"terminalId": "trm_1", "reset": true, "cols": 100, "rows": 1,
+                   "lines": [{"index": 0, "runs": []}],
+                   "cursor": {"row": 0, "col": 0, "visible": true, "shape": "bar"},
+                   "modes": {"altScreen": true}, "title": "", "scrollback": 0}),
+        ],
+        "TerminalClosedParams": TerminalClosedParams => [
+            json!({"terminalId": "trm_1", "exitCode": 3}),
+            json!({"terminalId": "trm_1"}),
+        ],
+        "TerminalInputParams": TerminalInputParams => [
+            json!({"terminalId": "trm_1", "data": "ls
+    "}),
+            json!({"terminalId": "trm_1", "data": "\u{1b}[A"}),
+        ],
+        "TerminalResizeParams": TerminalResizeParams => [json!({"terminalId": "trm_1", "cols": 80, "rows": 24})],
+        "TerminalScrollbackParams": TerminalScrollbackParams => [
+            json!({"terminalId": "trm_1"}),
+            json!({"terminalId": "trm_1", "before": -100, "limit": 50}),
+        ],
+        "TerminalScrollbackResult": TerminalScrollbackResult => [
+            json!({"lines": [], "complete": true}),
+            json!({"lines": [{"index": -101, "runs": [{"text": "old"}]}], "complete": false}),
+        ],
         "ToolCall": Event => [
             json!({"type": "toolCall", "turnId": "trn_1", "toolCallId": "call_1", "title": "Edit README.md", "kind": "edit",
                    "status": "pending", "locations": [{"path": "D:\\repo\\README.md", "line": 3}],

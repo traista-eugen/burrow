@@ -54,6 +54,8 @@ use burrow_protocol::{
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::launcher::LaunchSpec;
+
 /// One agent integration: detection plus starting sessions.
 pub trait AgentAdapter: Send + Sync + 'static {
     /// Which agent this adapter drives.
@@ -74,6 +76,20 @@ pub trait AgentAdapter: Send + Sync + 'static {
     ///
     /// Dropping the future before it resolves must stop everything it started.
     fn start(&self, config: SessionConfig) -> BoxFuture<'_, Result<StartedSession, AgentError>>;
+
+    /// The command that runs the agent's own interactive TUI, for a terminal session (M4). The
+    /// caller starts it on a pseudo console with [`crate::launcher::spawn_pty`]; this only says
+    /// what to run, with [`crate::terminal::for_session`] applied. The model and modes are the
+    /// TUI's business.
+    ///
+    /// The default: the agent has no TUI Burrow can run, which is [`AgentError::Unavailable`].
+    fn terminal(&self, config: &SessionConfig) -> Result<LaunchSpec, AgentError> {
+        let _ = config;
+        Err(AgentError::Unavailable(format!(
+            "{} has no terminal mode",
+            self.name()
+        )))
+    }
 
     /// Installs what Burrow manages for this agent, such as the pinned npm adapter an ACP agent
     /// runs through, and resolves once it is in place. Installing what is already installed

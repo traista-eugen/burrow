@@ -24,7 +24,7 @@ Every decision that shapes the architecture gets an entry here.
 | [D-015](#d-015-a-client-that-falls-behind-is-disconnected-and-resumes) | A client that falls behind is disconnected, and resumes | 2026-11-09 | accepted |
 | [D-016](#d-016-burrow-client-runs-its-io-on-tokio-behind-a-runtime-agnostic-api) | `burrow-client` runs its I/O on tokio, behind a runtime-agnostic API | 2026-11-09 | accepted |
 | [D-017](#d-017-current-state-lives-in-entity-rows-committed-with-its-events) | Current state lives in entity rows, committed with its events | 2026-11-09 | accepted |
-| [D-018](#d-018-one-adapter-interface-agent-processes-in-job-objects-and-a-fake-agent-that-is-a-real-process) | One adapter interface, agent processes in Job Objects, and a fake agent that is a real process | 2026-11-09 | accepted |
+| [D-018](#d-018-one-adapter-interface-agent-processes-in-job-objects-and-a-fake-agent-that-is-a-real-process) | One adapter interface, agent processes in Job Objects, and a fake agent that is a real process | 2026-11-09 | accepted; terminal processes are created inside their job instead (D-038) |
 | [D-019](#d-019-requests-run-concurrently-and-cancel-is-honoured) | Requests run concurrently, and `$/cancel` is honoured | 2026-11-09 | accepted |
 | [D-020](#d-020-acp-agents-are-launched-directly-npm-adapters-from-a-pinned-burrow-local-install) | ACP agents are launched directly; npm adapters from a pinned, Burrow-local install | 2026-11-09 | accepted; its `npx` fallback superseded by D-024 |
 | [D-021](#d-021-burrow-offers-acp-agents-no-client-capabilities-in-m2) | Burrow offers ACP agents no client capabilities in M2 | 2026-11-09 | accepted |
@@ -44,6 +44,9 @@ Every decision that shapes the architecture gets an entry here.
 | [D-035](#d-035-index-events-carry-what-a-list-entry-needs-and-agentinfo-lists-agent-modes) | Index events carry what a list entry needs, and `AgentInfo` lists agent modes | 2026-11-09 | accepted; amends D-029's consequence |
 | [D-036](#d-036-the-app-measures-itself-keeps-recent-sessions-open-and-redraws-only-for-what-changed-on-screen) | The app measures itself, keeps recent sessions open, and redraws only for what changed on screen | 2026-11-09 | accepted |
 | [D-037](#d-037-the-app-starts-burrowd-under-the-desktop-shell-out-of-its-own-process-tree) | The app starts `burrowd` under the desktop shell, out of its own process tree | 2026-11-09 | accepted; amends D-029's launch |
+| [D-038](#d-038-terminal-sessions-run-on-conpty-called-directly-and-are-created-inside-their-job-object) | Terminal sessions run on ConPTY, called directly, and are created inside their Job Object | 2026-11-10 | accepted |
+| [D-039](#d-039-terminals-are-emulated-in-burrowd-and-each-client-gets-paced-updates-that-scroll-its-copy) | Terminals are emulated in `burrowd`, and each client gets paced updates that scroll its copy | 2026-11-10 | accepted |
+| [D-040](#d-040-a-terminal-takes-the-size-of-the-client-that-last-resized-or-typed) | A terminal takes the size of the client that last resized or typed | 2026-11-10 | accepted |
 | [D-041](#d-041-the-terminal-view-sends-xterms-encodings-keeps-ctrlshiftc-and-v-for-the-clipboard-and-gives-a-focused-terminal-the-apps-keys) | The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys | 2026-11-10 | accepted |
 | [D-042](#d-042-the-terminal-view-paints-a-glyph-per-cell-from-line-layouts-cached-by-version-in-one-paint-layer-per-row) | The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row | 2026-11-10 | accepted |
 
@@ -878,6 +881,82 @@ This amends D-029's launch, which tried only the last two.
 - `burrowd`'s parent is Explorer, so Task Manager shows it under Explorer, not under Burrow.
 - `burrowd` gets the app's environment, as before. A `burrowd` started from a terminal sees that terminal's variables, such as `BURROW_MUSE_DISABLE_SANDBOX`.
 - `crates/burrow-app/src/backend/daemon.rs` tests that a process started this way is the shell's child and shares the shell's job membership. It was checked by hand by launching the app from a terminal tab, closing the tab, and finding `burrowd` still serving its pipe.
+
+## D-038 Terminal sessions run on ConPTY, called directly, and are created inside their Job Object
+
+**Decision.**
+- **ConPTY through `windows-sys`,** not `portable-pty`: `burrow_agents::launcher::spawn_pty` creates two anonymous pipes and a pseudo console (`CreatePseudoConsole`), then starts the program with `CreateProcessW` and two thread attributes: `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and `PROC_THREAD_ATTRIBUTE_JOB_LIST` with the session's new kill-on-close Job Object (D-007, D-018). The program never runs outside its job. It gets the console's standard handles, none of `burrowd`'s. A thread waits for its exit; `ProcessHandle` works as for structured agents.
+- **Closing:** when the program exits, or the session stops, the job is killed (the rest of the tree goes with it), then the console is closed on a blocking thread while the output is still read, since closing waits for its last frame to be drained.
+- **What runs:** each adapter's `AgentAdapter::terminal` gives the program its shim would run, so no `cmd.exe` or PowerShell sits between the console and the TUI: Claude Code's `claude.exe`, Codex's `node codex.js`, Cursor's bundled `node.exe index.js`, Muse's versioned binary. A shim whose layout isn't the expected one still runs, through `cmd.exe`, with arguments `cmd.exe` would interpret refused.
+- **The environment** loses what describes `burrowd`'s own terminal (`WT_SESSION`, `TERM_PROGRAM`, …), `NO_COLOR`, and Claude Code's `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`; it gains `TERM=xterm-256color` and `COLORTERM=truecolor`. The working folder loses Windows' `\\?\` prefix.
+- **The console's flags are 0:** no `PSEUDOCONSOLE_RESIZE_QUIRK` or `WIN32_INPUT_MODE`.
+
+**Why.**
+- `portable-pty` spawns the process itself, with no way to pass a job or start it suspended, so its children could escape the job between the spawn and an `AssignProcessToJobObject`. D-018 rejected `PROC_THREAD_ATTRIBUTE_JOB_LIST` only because `std::process::Command` can't reach it; a pseudo console needs a hand-written `CreateProcessW` anyway, and then the attribute costs two lines.
+- `alacritty_terminal`'s own `tty` module has the same gap, and owns its event loop.
+- **Shims inside a TUI misbehave:** a `cmd.exe` running `codex.cmd` asks "Terminate batch job (Y/N)?" after a Ctrl+C that reaches it, and draws it into the TUI's screen; PowerShell behind `agent.cmd` and `muse.cmd` adds a process and up to a second (D-020, D-023).
+- **The environment, as seen:** the widget session's demo found `NO_COLOR=1` inherited from Claude Code turning every colour off. Claude Code refuses to start inside another Claude Code session when it sees `CLAUDECODE`, which a `burrowd` started from one inherits. Cursor and Muse showed the folder as `\\?\C:\…` in their trust questions.
+- **Flags 0:** with them, narrowing a terminal kept every line exactly once in the scrollback (a test checks it), where the widget's `portable-pty` demo, which sets the resize quirk, showed lines twice.
+
+**Alternatives considered.**
+- **`portable-pty`, assigning the job right after the spawn:** the window above; and no control over the console's flags.
+- **Starting suspended and assigning before resuming,** as `launcher::spawn` does: also closes the window, but needs the Toolhelp walk to resume the thread; the attribute is simpler when `CreateProcessW` is ours.
+- **Parsing every `.cmd` shim:** fragile across npm versions (D-018). Only two known layouts are looked for, with the shim as the fallback.
+
+**Consequences.**
+- The pseudo console's host, `conhost.exe`, is started by `CreatePseudoConsole` as `burrowd`'s child, outside the job. It exits when the console closes, and when `burrowd` dies, since its pipes break. `stopping_a_terminal_session_leaves_no_stray_processes` checks nothing is left under `burrowd`.
+- `burrow-agents` depends on `Win32_System_Console` and `Win32_System_Pipes`. Terminal sessions are Windows-only for now, like everything that runs agents.
+- If Codex or Claude Code change their npm layout, their TUIs run through their shims, with `cmd.exe` in front, until `burrow_agents::terminal` learns the new one.
+
+## D-039 Terminals are emulated in `burrowd`, and each client gets paced updates that scroll its copy
+
+**Decision.**
+- **One emulator per terminal,** `alacritty_terminal` 0.26 (without its `serde` feature), with 10,000 lines of scrollback, in `burrowd/src/terminals`. A reader thread feeds the console's output to it under a short lock; a writer thread writes input, and the replies the emulator owes the program (cursor reports, colour queries), in order. Rows are rendered into protocol lines only where alacritty reports damage, and rows that didn't change keep their `Arc`.
+- **The line format** is the brief's: runs of text with `fg`, `bg` and style bits; wide characters written once; trailing blank cells left out. Lines gain `wrapped` (alacritty's `WRAPLINE`), and snapshots and updates carry the input modes (DECCKM, bracketed paste, mouse 1000/1002/1003 and SGR, focus, alternate screen, alternate scroll), the title and the bell.
+- **Updates per client:** a task per attachment wakes on a change, waits until 16 ms have passed since its last update, diffs the screen against what it last sent, sends it, and prepares the next only once the writer has put it in the pipe (the connection's queue now carries an acknowledgement for such lines). A slow client gets the latest state when it catches up, never a backlog, and the reader never waits for it. D-015's disconnect isn't needed: a screen, unlike an event stream, can skip states.
+- **Updates scroll.** An update says how many lines scrolled off the top since the client's previous one (`scrolled`); the client moves its rows up into its scrollback first, then applies `lines`: rows that differ after the move, and scrollback lines whose content differs from the client's copy (a row that changed just before scrolling off, or lines that scrolled past without ever being on its screen). A resize, a cleared scrollback, or a lost count sends `reset` with every row.
+- **Counting scrolled lines:** alacritty keeps no such count, so the screen remembers the heap address of the primary screen's top row and finds it again in the scrollback after each piece of output: rows keep their buffers while they scroll. Output is fed in pieces of 4 KiB, fewer lines than the scrollback holds, so the remembered row can't be recycled within a piece. When it isn't found, a new epoch starts and clients get a `reset`.
+- **Scrollback pages** are addressed at negative indexes relative to the client's screen (`-1` just above row 0), with `complete` at the oldest line. An attached client's pages are answered by its own update task, so each answer agrees with the `scrolled` counts it was sent before it.
+
+**Why.**
+- **A client draws, `burrowd` emulates:** several clients and a phone see one screen, and a detached client re-attaches to exactly the current state (D-002).
+- **The widget built for it** (the parallel M4 session, D-041 and D-042): its model moves rows on `scrolled` and keeps its own scrollback at negative indexes. Sending only rows that differ *after* the move is what makes that model exact, and it means a fast-scrolling build log costs the new lines per frame, not the whole screen.
+- **Answering pages from the update task** removes a race: a page computed while an update is still queued would be off by that update's scroll.
+- **The address trick** is exact where history growth isn't: once the scrollback is full, it stops growing while lines keep scrolling.
+
+**Alternatives considered.**
+- **Absolute line numbers** (a `top` count, and pages by number): this branch's first design. Robust, but the widget would have had to translate, and its shift model needs the server's diff to shift too.
+- **Diffs without the shift,** every scrolled row resent: simpler, and wrong for a client that moves its rows.
+- **alacritty's damage per client:** it has one damage state, reset by whoever reads it; per-client versions on top of it cost the same as comparing `Arc`s.
+- **A wrapper around the VT handler to count scrolls:** about eighty methods to delegate, and still blind to scrolls alacritty does inside a grid operation.
+
+**Consequences.**
+- Memory per terminal: the scrollback (alacritty stores about 24 bytes a cell, allocated as lines are used), the rendered rows, and a 2 MiB buffer `vte` reserves for synchronized updates.
+- The scroll count leans on an alacritty internal: rows keep their cell buffers when the grid rotates. An alacritty upgrade must pass the screen's tests (`counting_survives_a_full_scrollback` and the paging tests) before it's taken.
+- A burst of more than 10,000 lines between two updates leaves the oldest of them blank in a client's copy; `burrowd` no longer has them either.
+- Updates can carry many scrollback corrections after a long burst to a slow client; they are bounded by the scrollback.
+
+## D-040 A terminal takes the size of the client that last resized or typed
+
+**Decision.**
+- `terminal/resize` sets the terminal's size, and the connection remembers it as that client's size.
+- When an attached client sends `terminal/input` and its remembered size isn't the terminal's, the terminal takes that size first. So whoever types gets their size; the others draw the grid at it (they get a `reset` update).
+- Attaching changes nothing, and a client that never resized types without changing the size. `burrowctl terminal attach` resizes on its first keystroke and when its console is resized.
+- A terminal starts at 120 × 32.
+- This settles Q7.
+
+**Why.**
+- A TUI has one size. The person typing is the one looking at it; a phone peeking at a session must not reflow the desktop's screen, nor the other way round, until it is used.
+- tmux's default (the smallest client) shrinks everyone's view for a glance from a phone.
+
+**Alternatives considered.**
+- **The smallest client:** see above.
+- **The first client:** a later, bigger window could never use its room.
+- **Only explicit resizes:** a client switching to a terminal would have to resize again before typing, or type into the wrong size.
+
+**Consequences.**
+- Every switch between clients costs the TUI a redraw at the new size, and the others a reset.
+- `session/create` takes no size yet: the first client's resize, sent as it attaches, usually lands before the TUI draws (an open question in protocol.md).
 
 ## D-041 The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys
 

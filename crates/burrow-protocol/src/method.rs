@@ -147,11 +147,25 @@ method_table! {
         InboxGet = "inbox/get" (InboxItemIdParams) -> InboxItem;
         /// `inbox/respond`: answer an inbox item.
         InboxRespond = "inbox/respond" (InboxRespondParams) -> InboxItem;
+        /// `terminal/attach`: the whole screen now; `terminal/update` notifications follow.
+        TerminalAttach = "terminal/attach" (TerminalIdParams) -> TerminalSnapshot;
+        /// `terminal/detach`: stop the updates. Returns `{}`.
+        TerminalDetach = "terminal/detach" (TerminalIdParams) -> Empty;
+        /// `terminal/input`: send what the user typed to the terminal's program. Returns `{}`.
+        TerminalInput = "terminal/input" (TerminalInputParams) -> Empty;
+        /// `terminal/resize`: change the terminal's size. Returns `{}`.
+        TerminalResize = "terminal/resize" (TerminalResizeParams) -> Empty;
+        /// `terminal/scrollback`: a page of the lines above the screen.
+        TerminalScrollback = "terminal/scrollback" (TerminalScrollbackParams) -> TerminalScrollbackResult;
     }
     notifications {
         /// `$/cancel`: cancel one of the sender's own pending requests.
         Cancel = "$/cancel" (CancelParams);
         /// `events/event`: one event from a subscribed stream.
         EventsEvent = "events/event" (StreamEvent);
+        /// `terminal/update`: what changed on an attached terminal's screen.
+        TerminalUpdated = "terminal/update" (TerminalUpdate);
+        /// `terminal/closed`: an attached terminal's program exited.
+        TerminalClosedNotification = "terminal/closed" (TerminalClosedParams);
     }
 }

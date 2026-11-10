@@ -94,6 +94,13 @@ impl AgentAdapter for MspAdapter {
     fn start(&self, config: SessionConfig) -> BoxFuture<'_, Result<StartedSession, AgentError>> {
         Box::pin(start(config))
     }
+
+    fn terminal(&self, config: &SessionConfig) -> Result<LaunchSpec, AgentError> {
+        Ok(crate::terminal::for_session(
+            crate::terminal::muse(muse_binary())?,
+            config,
+        ))
+    }
 }
 
 /// Muse's versioned binary, which its `muse.cmd` launcher would run (D-023): found on `PATH` or

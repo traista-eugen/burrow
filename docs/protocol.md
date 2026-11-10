@@ -1,6 +1,6 @@
 # Burrow protocol
 
-> **Status:** draft, protocol version 0. Anything may change until version 1. Last updated 2026-11-09.
+> **Status:** draft, protocol version 0. Anything may change until version 1. Last updated 2026-11-10.
 >
 > **Source of truth (D-004):** the Rust types in `crates/burrow-protocol` define the protocol. This document explains the intent. The JSON Schema generated from those types, [`schema/burrow-protocol.schema.json`](../schema/burrow-protocol.schema.json), is the exact contract. Regenerate it with `cargo xtask schema` whenever the types change; a test fails if it's out of date.
 >
@@ -8,6 +8,7 @@
 > - **M1:** the [common rules](#common-rules), `initialize`, `$/ping`, `$/cancel`, `events/subscribe`, `events/unsubscribe`, `events/event`, the [`index` stream events](#index-stream-events) and [`debug/append`](#development-methods).
 > - **M2:** [projects](#projects) (`project/list`, `add`, `get`, `remove`), [agents and usage](#agents-roles-and-usage) (`agent/list`, `agent/refresh`, `agent/install`, `usage/get`), [sessions](#sessions) and their [events](#session-events), and the [inbox](#inbox).
 > - **M3:** `session/rename`, `lastActivityAt` on sessions and on `entityStateChanged`, lists sorted by activity, Muse's approval modes as agent modes, and permission requests the agent withdraws. Then, for the app's controls: the agent on a session's `entityCreated`, the actions on `inboxItemAdded`, and `AgentInfo.agentModes` ([revision notes](#revision-notes)).
+> - **M4:** terminal sessions (`session/create`'s `mode: "terminal"`, `terminalOpened`, `terminalClosed`) and the [terminal methods](#terminals): `terminal/attach`, `detach`, `input`, `resize`, `scrollback`, and the `terminal/update` and `terminal/closed` notifications.
 >
 > `burrowd` serves all of them over the named pipe, and `burrow-client` speaks them. Everything else in this document is design that has no Rust types yet; the sections say which parts.
 
@@ -388,7 +389,13 @@ ACP embeds image data directly. Burrow passes artifact references instead, and t
 Settled in M2:
 - **`session/create`** answers once the agent is ready (`idle`), which can take seconds for an npm-based agent. Clients that want to show progress follow the `index`: the session appears there as `starting` straight away.
   - `cwd` defaults to the project's folder. Without a `projectId`, `cwd` is required. It must be an existing folder (`-32602`).
-  - `mode: "terminal"` is `unavailable` until M4. An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable` too, and so is Claude Code or Codex before `agent/install`; a failed start leaves the session `failed`.
+  - An agent `burrowd` doesn't offer, or one it can't drive yet, is `unavailable`, and so is Claude Code or Codex before `agent/install` (for structured sessions); a failed start leaves the session `failed`.
+- **Terminal sessions** (`mode: "terminal"`, M4) run the agent's own TUI on a [terminal](#terminals), instead of a protocol adapter: Claude Code's `claude.exe`, Codex's `codex.js`, Cursor's `agent` (run as for ACP, without `acp`), Muse's versioned binary; with `--dev`, agent `fake` runs a fake TUI. `fake-acp` has no terminal mode (`unavailable`).
+  - `model` and `agentMode` are `-32602`: they are chosen in the TUI.
+  - `session/create` answers once the program is started, `idle`; the stream has `stateChanged` (`starting`), `terminalOpened` with the terminal's id, then `stateChanged` (`idle`). Clients learn the terminal from `terminalOpened`.
+  - The session stays `idle` while the TUI runs: Burrow can't see its turns. When the program exits, `terminalClosed` carries its exit code, and the session ends `stopped` for code 0 (reason `the program exited`) or `failed` otherwise (`the program exited with code 3`). `session/stop` and `session/archive` end it too: `terminalClosed` without an exit code, then `stopped`.
+  - `session/prompt` is `invalidState` (input goes through `terminal/input`); `session/setModel` and `session/setAgentMode` are `invalidState`; `session/cancel` does nothing.
+  - A restart marks it `stopped` like any session, with `terminalClosed` first.
   - `model` must be one the agent offers, else `-32602`, and the session ends `failed`.
 - **Models** (D-032) are named by their id, or by their `name` when exactly one model has it, ignoring case: Cursor's `gpt-5.5` is its `gpt-5.5[context=272k,reasoning=medium,fast=false]`, and `auto` its `default[]`. That holds for `session/create`'s `model` and for `session/setModel`; the session records, and `modelChanged` reports, the id.
 - **Agent modes** (D-024) are the agent's own, for example Claude Code's `default`, `acceptEdits`, `plan`, `auto` and `bypassPermissions`, or Codex's `read-only`, `workspace-write`, `agent` and `agent-full-access`. They decide what the agent asks permission for. `mode` was taken: it says structured or terminal.
@@ -426,7 +433,8 @@ Session event types deliberately mirror ACP's `session/update` kinds, so the ACP
 | `stateChanged` | `state, reason?` (why it stopped or failed) |
 | `modelChanged` | `model` |
 | `agentModeChanged` | `agentMode` |
-| `terminalOpened` | `terminalId` (M4) |
+| `terminalOpened` | `terminalId`: the session's terminal, for `terminal/attach` |
+| `terminalClosed` | `terminalId, exitCode?`: its program ended; no `exitCode` when Burrow ended it |
 
 - **Values mirror ACP, in camelCase.** `kind` of a tool call is `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switchMode` or `other`; `status` is `pending`, `inProgress`, `completed` or `failed`; a plan entry's `status` is `pending`, `inProgress` or `completed` and its `priority` `high`, `medium` or `low`; a permission option's `kind` is `allowOnce`, `allowAlways`, `rejectOnce` or `rejectAlways`. All of these, and `turnEnded`'s `reason`, are open enums.
 - **Tool call content** is `{type: "content", content: ContentBlock}`, `{type: "diff", path, oldText?, newText}` or `{type: "terminal", terminalId}`.
@@ -476,18 +484,102 @@ A turn with a permission request, as a client sees it:
 
 ### Terminals
 
-Terminal-mode sessions, and terminals that agents start, are emulated inside `burrowd`. Clients only draw a grid of cells, and several clients can attach to the same terminal.
+A terminal session runs an agent's own TUI on a pseudo console (ConPTY), inside its Job Object (D-038). `burrowd` emulates the terminal with `alacritty_terminal`; clients only draw a grid of cells, and several clients can attach to the same terminal (D-039).
 
 | Method | Params → Result |
 |---|---|
-| `terminal/attach` | `{terminalId}` → `{cols, rows, cursor, lines: Line[]}` (a snapshot), followed by `terminal/update` notifications |
-| `terminal/detach` | `{terminalId}` → `{}` |
-| `terminal/input` | `{terminalId, data}` → `{}`. `data` is UTF-8 text, including escape sequences for special keys. |
+| `terminal/attach` | `{terminalId}` → `TerminalSnapshot`: the whole screen. `terminal/update` notifications follow. |
+| `terminal/detach` | `{terminalId}` → `{}`. No update of the terminal follows the answer. |
+| `terminal/input` | `{terminalId, data}` → `{}`. `data` is what the user typed, as a terminal sends it. |
 | `terminal/resize` | `{terminalId, cols, rows}` → `{}` |
+| `terminal/scrollback` | `{terminalId, before?, limit?}` → `{lines, complete}`: a page of the lines above the screen |
 
-- **Updates:** the notification `terminal/update {terminalId, lines: {index, runs}[], cursor}` sends only the lines that changed, at most once per frame (about 16 ms).
-- **Line format:** a line is a list of runs, each a piece of text with one style: `{text, fg?, bg?, flags?}`.
-- **No event log:** terminal updates aren't stored. The snapshot on attach is the history.
+| Notification | Params |
+|---|---|
+| `terminal/update` | `TerminalUpdate`: what changed since this client's previous snapshot or update |
+| `terminal/closed` | `{terminalId, exitCode?}`: the program exited; sent after the last update |
+
+```ts
+type TerminalSnapshot = {
+  terminalId: string; cols: number; rows: number;
+  cursor: Cursor;
+  lines: Line[];          // every row of the screen, index 0 to rows - 1
+  modes: TerminalModes;
+  title?: string;         // the window title the program set
+  scrollback: number;     // lines burrowd keeps above the screen: indexes -scrollback to -1 (at most 10,000)
+  exit?: { exitCode?: number };   // the program has exited; no updates follow
+};
+type TerminalUpdate = {
+  terminalId: string;
+  reset?: true; cols?: number; rows?: number;   // the screen and the scrollback start afresh
+  scrolled?: number;      // lines that scrolled off the top into the scrollback; 0 when absent
+  lines: Line[];          // rows that changed, and scrollback lines that differ from the client's copy
+  cursor: Cursor;         // always
+  modes?: TerminalModes;  // when any changed
+  title?: string;         // when it changed; "" when cleared
+  scrollback?: number;    // when it changed
+  bell?: true;            // the bell rang
+};
+type Line   = { index: number; runs: Run[]; wrapped?: true }   // index: 0 = top row; -1 = the scrollback line just above it
+type Run    = { text: string; fg?: Color; bg?: Color; flags?: number }
+type Color  = number /* 0–255 palette index; 0–15 are the themeable ANSI colours */ | string /* "#rrggbb" */
+// flags bits: 1 bold, 2 italic, 4 underline, 8 inverse, 16 dim, 32 strikethrough, 64 hidden, 128 undercurl
+type Cursor = { row: number; col: number; visible: boolean; shape: "block" | "underline" | "bar" }
+type TerminalModes = {   // each off when absent
+  appCursor?: true;        // DECCKM: arrows, Home and End send ESC O A, not ESC [ A
+  appKeypad?: true;        // DECKPAM: the keypad sends ESC O sequences
+  bracketedPaste?: true;   // wrap pastes in ESC [200~ … ESC [201~
+  mouse?: "click" | "drag" | "motion";   // report the mouse: modes 1000, 1002, 1003
+  mouseSgr?: true;         // in SGR encoding (1006), else X10
+  focusEvents?: true;      // send ESC [I and ESC [O on focus changes (1004)
+  altScreen?: true;        // the alternate screen is shown: no scrollback
+  alternateScroll?: true;  // on the alternate screen, the wheel sends Up and Down (1007)
+};
+```
+
+**Lines and cells.**
+- A line's runs cover its cells from the left. They may stop before the last column: the rest of the row is blank, in the default colours. A blank line has no runs. Trailing blank cells are always left out.
+- A wide character, such as `漢` or most emoji, occupies two cells. Its run's text holds the character once, and the client measures its display width (Unicode East Asian Width, as `unicode-width` 0.2 does). Combining marks follow the character they belong to. A cursor on a wide character is on its first cell.
+- `wrapped` says the line's text continues on the next line (a soft wrap), so copying joins them.
+- Colours `0`–`15` are the client's theme; `16`–`255` are xterm's cube and grey ramp; an absent `fg` or `bg` is the theme's default. A palette entry the program redefined (OSC 4) is sent as `"#rrggbb"`.
+
+**Updates.** Each attached client gets at most one update every 16 ms. A burst of output is coalesced into one update, and the next update is prepared only once the previous one has been written to the client's pipe. So a client that reads slowly gets the latest state when it catches up, never a backlog, and never holds up the terminal or other clients (D-039). A client applies an update in this order:
+1. **`reset`**: the terminal's size is now `cols` × `rows`; the client drops its screen and its scrollback, and `lines` holds every row. It comes after a resize, and when `burrowd` lost track of which lines scrolled (the program cleared the scrollback, or a burst too large to follow). The scrollback can be paged again.
+2. **`scrolled`**: the client moves its top `scrolled` rows into its scrollback (its old top row becomes line `-scrolled`, its old row `scrolled - 1` line `-1`), moves the other rows up, and fills the bottom with blank rows. Lines that scrolled past without ever being on the client's screen (more than `rows` scrolled) are blank until `lines` fills them.
+3. **`lines`** replace the lines at their indexes: rows that differ after the move, and scrollback lines that differ from the client's copy, such as a row that changed just before it scrolled off. A client that keeps no scrollback ignores negative indexes.
+
+So the client's copy of the screen, and of every scrollback line it has seen scroll off, is always exact. A burst larger than the scrollback (10,000 lines) leaves the oldest of those lines blank in the client's copy; `burrowd` no longer has them either.
+
+**Scrollback.** `terminal/scrollback` returns up to `limit` lines (default 100, at most 1000) just above index `before` (default `0`: the newest), oldest first, at their negative indexes. `complete` says no older line is kept. A client pages back by passing the oldest index it has as `before`. For a client attached to the terminal, indexes are relative to the screen as that client has it: its update task answers, so the answer comes in order with its updates and agrees with every `scrolled` it was sent. For a client that isn't attached, they are relative to the screen now. A page asked for across a `reset` is empty and not `complete`. The alternate screen has no scrollback.
+
+**Input.** `data` is UTF-8 text with escape sequences for special keys, encoded for the current `modes`: arrows as `ESC [ A`, or `ESC O A` with `appCursor`; Enter as `\r`; pastes wrapped when `bracketedPaste` is on; mouse reports when `mouse` asks for them. Burrow doesn't offer the kitty keyboard protocol, so programs use these legacy encodings. Input is written to the program in the order requests arrive on a connection; `burrowd` handles `terminal/input`, `terminal/resize`, `terminal/attach` and `terminal/detach` in order, before reading the connection's next line. Input waiting for a program that doesn't read it is capped at 1 MiB, beyond which `terminal/input` is `invalidState`; so is input to a terminal whose program has exited.
+
+**Size (Q7, D-040): the latest wins.** A terminal starts at 120 × 32. `terminal/resize` sets its size (2–1000 columns, 1–500 rows, else `-32602`), and the connection remembers it as what that client wants. When an attached client sends `terminal/input` and last asked for a size other than the terminal's, the terminal takes that size first. So whoever types gets their size, and the others draw the grid at it: every client gets the `reset` update. Attaching changes nothing, and a client that never resized types without changing the size.
+
+**Lifecycle.**
+- **Attaching** twice on one connection is `invalidState`; detach first. An unknown terminal is `notFound`. Detaching a terminal that isn't attached does nothing.
+- **When the program exits,** by itself or because its session stopped, `burrowd` kills the rest of its process tree, closes the console and reads its last output. Attached clients then get their last `terminal/update` and `terminal/closed`. The terminal stays attachable, with its last screen and scrollback (`exit` set), until its session is archived, `burrowd` restarts, or 32 more terminals have closed.
+- **No event log:** screens aren't stored. The snapshot on attach is the history; `burrowd` restarting ends every terminal.
+
+**Programs ask, `burrowd` answers.** The emulator answers what programs ask a terminal: the cursor position (DSR), device attributes, the window size in cells and pixels (a cell counts as 8 × 16), and colours (OSC 10, 11, 4) from a fixed dark palette, since the client's theme isn't known. Clipboard requests (OSC 52) are ignored. A synchronized update (mode 2026) is shown when it ends, or after 150 ms.
+
+A program that shows `Ready.` and a prompt `$`, as a client sees it when the user types `hi` and Enter:
+
+```jsonc
+// client → burrowd
+{"jsonrpc":"2.0","id":3,"method":"terminal/attach","params":{"terminalId":"trm_01JC…"}}
+// burrowd → client: the whole screen
+{"jsonrpc":"2.0","id":3,"result":{"terminalId":"trm_01JC…","cols":80,"rows":2,"cursor":{"row":1,"col":2,"visible":true,"shape":"block"},"lines":[{"index":0,"runs":[{"text":"Ready.","fg":2,"flags":1}]},{"index":1,"runs":[{"text":"$"}]}],"modes":{"bracketedPaste":true},"scrollback":0}}
+// client → burrowd
+{"jsonrpc":"2.0","id":4,"method":"terminal/input","params":{"terminalId":"trm_01JC…","data":"hi\r"}}
+// burrowd → client: two lines scrolled; the second changed ("$ hi") before it left the screen
+{"jsonrpc":"2.0","id":4,"result":{}}
+{"jsonrpc":"2.0","method":"terminal/update","params":{"terminalId":"trm_01JC…","scrolled":2,"lines":[{"index":-1,"runs":[{"text":"$ hi"}]},{"index":0,"runs":[{"text":"hi"}]},{"index":1,"runs":[{"text":"$"}]}],"cursor":{"row":1,"col":2,"visible":true,"shape":"block"},"scrollback":2}}
+// client → burrowd: the scrollback, from the newest line
+{"jsonrpc":"2.0","id":5,"method":"terminal/scrollback","params":{"terminalId":"trm_01JC…","before":0,"limit":50}}
+// burrowd → client
+{"jsonrpc":"2.0","id":5,"result":{"lines":[{"index":-2,"runs":[{"text":"Ready.","fg":2,"flags":1}]},{"index":-1,"runs":[{"text":"$ hi"}]}],"complete":true}}
+```
 
 ### Flows and runs
 
@@ -738,11 +830,19 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **`inboxItemAdded` gained `actions?`:** the item's actions, always sent by `burrowd`. A client fetches `inbox/get` only when they are absent.
 - **`AgentInfo` gained `agentModes?`:** the modes `agentMode` accepts, with descriptions. Muse's from detection; the ACP agents' from their latest session, as `models` are (D-032).
 
+**2026-11-10, terminal sessions (M4).** Additive; the schema is regenerated (D-038 to D-040):
+- **Terminal sessions:** `session/create` with `mode: "terminal"` starts the agent's TUI; no `model` or `agentMode`. The new session event `terminalClosed {terminalId, exitCode?}` joins `terminalOpened`.
+- **Terminal methods:** `terminal/attach` (a `TerminalSnapshot`), `terminal/detach`, `terminal/input`, `terminal/resize`, `terminal/scrollback`; the notifications `terminal/update` and `terminal/closed`. They replace the earlier sketch: snapshots carry the modes clients encode input for, the title and the scrollback length; lines can be negative (scrollback) and `wrapped`.
+- **Updates scroll:** an update says how many lines scrolled (`scrolled`) and the client moves its rows first, then applies the lines that differ, scrollback corrections included; a `reset` replaces everything after a resize. Clients keep an exact copy of the scrollback that scrolled past them.
+- **Q7 settled:** the terminal takes the size of the client that last resized or typed (D-040).
+
 ## Open questions
 
 - **Resuming sessions:** a `stopped` session can't be continued yet. ACP's `session/load` could resume one in a new agent process; how that shows in the stream (a new state, or `starting` again) is open.
 - **Usage history:** `usage/get` is kept in memory only, so a restart forgets reported limits. Flows that wait for a limit to reset (M7) will need it stored.
-- **Terminal size:** with several clients attached at different sizes, which size wins? For now, the last client to resize.
+- **Terminal colours:** programs that ask for the terminal's colours (OSC 10, 11) get a fixed dark palette. Clients could tell `burrowd` their theme on `terminal/attach`.
+- **A terminal's first size:** a terminal starts at 120 × 32, and the first client resizes it. `session/create` could take the size, so the TUI draws its first screen at it.
+- **More of the terminal:** the clipboard (OSC 52), hyperlinks (OSC 8), underline colours and the kitty keyboard protocol aren't passed on yet.
 - **Log compaction:** whether to fold a turn's message chunks into one message once the turn completes. Clients would need to handle `reset`.
 - **Remote media:** whether remote connections need a binary side channel for media instead of base64 chunks.
 - **Notifications:** push notifications for inbox items need a relay (D-008).

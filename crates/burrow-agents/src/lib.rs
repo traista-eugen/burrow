@@ -27,6 +27,7 @@ pub mod fake;
 pub mod launcher;
 pub mod msp;
 pub mod registry;
+pub mod terminal;
 
 pub use adapter::{
     AgentAdapter, AgentError, AgentEvent, AgentModes, AgentSession, PermissionId,

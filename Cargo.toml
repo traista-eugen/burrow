@@ -69,10 +69,12 @@ agent-client-protocol = "5.0.0"
 tokio-util = "0.7.20"
 # Muse Code's MSP client.
 burrow-msp = { path = "crates/burrow-msp" }
-# Terminals (M4). The app measures cell widths with `unicode-width`, the version GPUI already
-# uses; its dev-only terminal demo emulates a local shell with the other two.
+# Terminals (M4). `burrowd` emulates each terminal session with `alacritty_terminal`, without its
+# serde feature: nothing of it is serialized. The app measures cell widths with `unicode-width`,
+# the version GPUI already uses; its dev-only terminal demo also uses `alacritty_terminal`, with
+# `portable-pty`.
 unicode-width = "0.2.3"
-alacritty_terminal = "0.26.0"
+alacritty_terminal = { version = "0.26.0", default-features = false }
 portable-pty = "0.9.0"
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI

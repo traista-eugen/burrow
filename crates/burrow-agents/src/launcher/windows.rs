@@ -57,7 +57,7 @@ impl Job {
         Ok(job)
     }
 
-    fn raw(&self) -> HANDLE {
+    pub(super) fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle()
     }
 

@@ -309,9 +309,22 @@ fn typed_methods_share_one_table() {
             "inbox/list",
             "inbox/get",
             "inbox/respond",
+            "terminal/attach",
+            "terminal/detach",
+            "terminal/input",
+            "terminal/resize",
+            "terminal/scrollback",
         ]
     );
-    assert_eq!(names.1, ["$/cancel", "events/event"]);
+    assert_eq!(
+        names.1,
+        [
+            "$/cancel",
+            "events/event",
+            "terminal/update",
+            "terminal/closed"
+        ]
+    );
 }
 
 #[test]

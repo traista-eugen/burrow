@@ -21,7 +21,8 @@ pub enum SessionMode {
     /// Through ACP or MSP: Burrow sees messages, tool calls and permission requests.
     #[default]
     Structured,
-    /// The agent's own TUI in a pseudo-terminal. Not available until M4.
+    /// The agent's own TUI in a pseudo-terminal, emulated by `burrowd`. Clients draw it through
+    /// `terminal/attach`; the session's stream says which terminal with `terminalOpened`.
     Terminal,
 }
 
@@ -280,7 +281,9 @@ pub struct SessionCreateParams {
     /// The model to use; the agent's default when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Structured (the default) or terminal. Terminal sessions are `unavailable` until M4.
+    /// Structured (the default) or terminal. A terminal session runs the agent's own TUI; its
+    /// stream announces the terminal with `terminalOpened`, and it takes no `model` or
+    /// `agentMode`.
     #[serde(default)]
     pub mode: SessionMode,
     /// The agent's own mode to start in, for example `read-only`. When absent, the agent's
@@ -708,12 +711,26 @@ pub struct AgentModeChanged {
     pub agent_mode: String,
 }
 
-/// `terminalOpened`: a terminal belongs to this session (M4).
+/// `terminalOpened`: a terminal belongs to this session. A terminal session's stream has it
+/// right after `stateChanged` (`starting`), before the session is `idle`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpened {
-    /// The terminal's id, for `terminal/attach`.
+    /// The terminal's id (`trm_…`), for `terminal/attach`.
     pub terminal_id: String,
+}
+
+/// `terminalClosed`: the terminal's program ended, by itself or because the session stopped.
+/// Comes just before the `stateChanged` that ends the session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalClosed {
+    /// The terminal's id.
+    pub terminal_id: String,
+    /// The program's exit code. Absent when Burrow ended it: `session/stop`, `session/archive`,
+    /// or `burrowd` stopping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 fn is_false(value: &bool) -> bool {

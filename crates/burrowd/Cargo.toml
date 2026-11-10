@@ -9,6 +9,7 @@ publish.workspace = true
 default-run = "burrowd"
 
 [dependencies]
+alacritty_terminal.workspace = true
 burrow-agents.workspace = true
 burrow-protocol.workspace = true
 burrow-store.workspace = true

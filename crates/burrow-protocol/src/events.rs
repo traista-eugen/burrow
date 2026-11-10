@@ -19,8 +19,8 @@ use crate::inbox::InboxAction;
 use crate::open_enum::doc_text;
 use crate::session::{
     AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, LimitReached, ModelChanged,
-    PermissionRequested, PermissionResolved, Plan, StateChanged, TerminalOpened, ToolCall,
-    ToolCallUpdate, TurnEnded, Usage, UserMessage,
+    PermissionRequested, PermissionResolved, Plan, StateChanged, TerminalClosed, TerminalOpened,
+    ToolCall, ToolCallUpdate, TurnEnded, Usage, UserMessage,
 };
 use crate::time::Timestamp;
 
@@ -528,8 +528,10 @@ event_enum! {
         ModelChanged = "modelChanged",
         /// `session:<id>`: the agent now runs in another of its modes.
         AgentModeChanged = "agentModeChanged",
-        /// `session:<id>`: a terminal belongs to the session (M4).
+        /// `session:<id>`: a terminal belongs to the session.
         TerminalOpened = "terminalOpened",
+        /// `session:<id>`: the session's terminal program ended.
+        TerminalClosed = "terminalClosed",
     }
 }
 

@@ -140,6 +140,19 @@ Muse's approval modes are its agent modes: sessions start in `promptUnmatched`, 
 
 **Muse's shell tool needs its Windows sandbox.** Until you run `muse sandbox windows setup` in an elevated terminal, Muse's shell commands fail; its other tools work. `agent list` reports it as Muse's `problem`. Burrow never turns the sandbox off for you. To see an approval anyway, start `burrowd` with `$env:BURROW_MUSE_DISABLE_SANDBOX = "1"`: Muse then asks before every shell command it doesn't already allow (D-027).
 
+### Try a terminal session
+
+A terminal session runs an agent's own TUI inside Burrow: `burrowd` emulates the terminal, and any client can attach to the same screen. Starting a TUI spends no quota; only what you type into it does.
+
+```powershell
+cargo run -p burrowd -- --dev                                                   # terminal 1; --dev adds the fake TUI
+cargo run -p burrowctl -- session new --agent fake --mode terminal --attach     # terminal 2: type, or /flood 200
+cargo run -p burrowctl -- terminal attach ses_…                                  # terminal 3: the same screen
+cargo run -p burrowctl -- session new --agent claude --mode terminal --attach   # or codex, cursor, muse
+```
+
+`Ctrl+]` then `d` detaches; the session keeps running. The terminal takes the size of the client that last typed or resized (D-040). `terminal show ses_…` prints the screen as text, `terminal scrollback ses_…` the lines above it, and `terminal send ses_… "/pids" --enter` types into it. `session stop ses_…` ends the TUI and everything it started.
+
 ### Notes
 
 - **Where things live:** `burrowd` keeps its database and logs in `%LOCALAPPDATA%\Burrow`; `--data-dir <dir>` puts them elsewhere.

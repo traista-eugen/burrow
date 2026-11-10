@@ -29,6 +29,7 @@ mod projects;
 #[cfg(windows)]
 mod server;
 mod sessions;
+mod terminals;
 mod wire;
 
 use std::fmt;
@@ -219,6 +220,7 @@ async fn serve(
     use crate::projects::Projects;
     use crate::server::{BindError, Listener};
     use crate::sessions::Sessions;
+    use crate::terminals::Terminals;
 
     // The pipe first: it is what makes this the only burrowd for the pipe, so a second one exits
     // before it touches the database.
@@ -253,9 +255,16 @@ async fn serve(
         .map_err(|error| Fatal::other(format!("can't start the keep-awake thread: {error}")))?;
     // Marks the sessions that were live when the last burrowd stopped as stopped, before any
     // client can see them.
-    let sessions = Sessions::load(hub.clone(), agents.clone(), projects.clone(), keep_awake)
-        .await
-        .map_err(|error| Fatal::other(format!("can't load sessions: {error}")))?;
+    let terminals = Terminals::new();
+    let sessions = Sessions::load(
+        hub.clone(),
+        agents.clone(),
+        projects.clone(),
+        keep_awake,
+        terminals.clone(),
+    )
+    .await
+    .map_err(|error| Fatal::other(format!("can't load sessions: {error}")))?;
     agents.detect_in_background();
 
     info!(
@@ -278,6 +287,7 @@ async fn serve(
         projects,
         agents,
         sessions: sessions.clone(),
+        terminals,
     });
     tokio::select! {
         () = server::serve(listener, context) => {}
