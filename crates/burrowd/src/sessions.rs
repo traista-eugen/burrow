@@ -27,6 +27,15 @@
 //! - **Restarts.** Agent processes die with `burrowd` (Job Objects, D-007). On startup, sessions
 //!   the rows still show as live are marked `stopped` and their open inbox items expire, with
 //!   events, before any client connects. A clean shutdown does the same while stopping them.
+//!
+//! # Terminal sessions
+//!
+//! A session created with `mode: "terminal"` runs the agent's own TUI on a pseudo console
+//! ([`crate::terminals`]) instead of a protocol adapter. Its stream is short: `stateChanged`
+//! (`starting`), `terminalOpened`, `stateChanged` (`idle`) while the TUI runs, then
+//! `terminalClosed` with the exit code and `stateChanged`: `stopped` when the program exited
+//! with code 0 or was stopped, `failed` otherwise. It has no turns: its core holds a
+//! [`TerminalSession`] that refuses prompts, models and modes, and stops the terminal.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -46,8 +55,10 @@ use burrow_protocol::{
     PermissionResolved, ProviderUsage, Session, SessionCreateParams, SessionListParams,
     SessionMode, SessionPromptParams, SessionPromptResult, SessionRenameParams,
     SessionSetAgentModeParams, SessionSetModelParams, SessionState, SessionSummary, StateChanged,
-    StreamName, Timestamp, TurnEndReason, TurnEnded, Usage, UsageSource, UserMessage,
+    StreamName, TerminalClosed, TerminalOpened, TerminalSize, Timestamp, TurnEndReason, TurnEnded,
+    Usage, UsageSource, UserMessage,
 };
+use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -59,6 +70,7 @@ use crate::hub::{Commit, Hub, HubError};
 use crate::ids;
 use crate::keep_awake::KeepAwake;
 use crate::projects::{self, Projects};
+use crate::terminals::{Terminal, Terminals};
 
 /// The entity kind of session rows.
 const SESSION: &str = "session";
@@ -85,6 +97,7 @@ pub struct Sessions {
     agents: Arc<Agents>,
     projects: Arc<Projects>,
     keep_awake: KeepAwake,
+    terminals: Arc<Terminals>,
     shared: Mutex<Shared>,
 }
 
@@ -122,6 +135,7 @@ impl Slot {
                 session,
                 snapshot,
                 agent: None,
+                terminal: None,
                 buffer: None,
                 pending: BTreeMap::new(),
             }),
@@ -142,6 +156,8 @@ struct Core {
     stream: StreamName,
     /// The running agent; `None` once stopped or failed.
     agent: Option<Box<dyn AgentSession>>,
+    /// A terminal session's terminal.
+    terminal: Option<Arc<Terminal>>,
     /// Agent text not committed yet.
     buffer: Option<TextBuffer>,
     /// Open permission requests, by inbox item id.
@@ -185,6 +201,7 @@ impl Sessions {
         agents: Arc<Agents>,
         projects: Arc<Projects>,
         keep_awake: KeepAwake,
+        terminals: Arc<Terminals>,
     ) -> Result<Arc<Self>, HubError> {
         let mut sessions = BTreeMap::new();
         for row in hub.entities(SESSION).await? {
@@ -257,6 +274,17 @@ impl Sessions {
                     );
                     session.last_activity_at = Some(now);
                 }
+                if session.mode == SessionMode::Terminal
+                    && let Some(terminal_id) = terminal_of(&hub, &stream).await?
+                {
+                    commit.event(
+                        &stream,
+                        TerminalClosed {
+                            terminal_id,
+                            exit_code: None,
+                        },
+                    );
+                }
                 let reason = "burrowd stopped, and the agent process ended with it";
                 session.state = SessionState::Stopped;
                 session.reason = Some(reason.into());
@@ -309,6 +337,7 @@ impl Sessions {
             agents,
             projects,
             keep_awake,
+            terminals,
             shared: Mutex::new(Shared {
                 slots,
                 inbox,
@@ -352,16 +381,24 @@ impl Sessions {
     ///
     /// `cancel` (the request's `$/cancel`) and `session/stop` abort the start: the agent's
     /// process tree is killed and the session ends `stopped`.
+    ///
+    /// A terminal session answers once its TUI is started on its terminal.
     pub async fn create(
         self: &Arc<Self>,
         params: SessionCreateParams,
         cancel: &Cancel,
     ) -> Result<Session, ErrorObject> {
         if params.mode == SessionMode::Terminal {
-            return Err(ErrorObject::new(
-                ErrorKind::Unavailable,
-                "terminal sessions arrive with M4",
-            ));
+            if params.model.is_some() {
+                return Err(ErrorObject::invalid_params(
+                    "a terminal session takes no model: choose it in the agent's TUI",
+                ));
+            }
+            if params.agent_mode.is_some() {
+                return Err(ErrorObject::invalid_params(
+                    "a terminal session takes no agentMode: choose it in the agent's TUI",
+                ));
+            }
         }
         let Some(adapter) = self.agents.registry().get(&params.agent) else {
             let offered: Vec<String> = self
@@ -400,7 +437,7 @@ impl Sessions {
             project_id: params.project_id.clone(),
             agent: params.agent.clone(),
             model: params.model.clone(),
-            mode: SessionMode::Structured,
+            mode: params.mode,
             cwd: projects::display_path(&cwd),
             title: params
                 .title
@@ -451,6 +488,11 @@ impl Sessions {
             cwd,
             model: params.model.clone(),
         };
+        if params.mode == SessionMode::Terminal {
+            return self
+                .start_terminal(slot.clone(), core, adapter.as_ref(), &config, cancel)
+                .await;
+        }
         let start = tokio::select! {
             result = start_in_mode(adapter.as_ref(), config, params.agent_mode.clone()) => {
                 Start::Done(result)
@@ -512,6 +554,72 @@ impl Sessions {
         change.next.reason = Some(reason);
         core.finish(self, change).await?;
         Err(error)
+    }
+
+    /// Starts a terminal session's TUI on a new terminal, and makes the session `idle`; or
+    /// `failed` when it can't start, `stopped` when the start was cancelled or stopped meanwhile.
+    async fn start_terminal(
+        self: &Arc<Self>,
+        slot: Arc<Slot>,
+        mut core: tokio::sync::MutexGuard<'_, Core>,
+        adapter: &dyn AgentAdapter,
+        config: &SessionConfig,
+        cancel: &Cancel,
+    ) -> Result<Session, ErrorObject> {
+        let opened = adapter.terminal(config).and_then(|spec| {
+            self.terminals
+                .open(&spec, TerminalSize::DEFAULT)
+                .map_err(|error| {
+                    AgentError::Unavailable(format!(
+                        "can't start {}: {error}",
+                        spec.program.display()
+                    ))
+                })
+        });
+        let terminal = match opened {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                warn!(session = core.session.id, %error, "the terminal didn't start");
+                let mut change = core.begin();
+                change.next.state = SessionState::Failed;
+                change.next.reason = Some(error.to_string());
+                core.finish(self, change).await?;
+                return Err(agent_error(error));
+            }
+        };
+        if cancel.is_cancelled() || slot.stop.is_cancelled() {
+            terminal.stop().await;
+            self.terminals.remove(terminal.id());
+            let mut change = core.begin();
+            change.next.state = SessionState::Stopped;
+            change.next.reason = Some("stopped while starting".to_owned());
+            core.finish(self, change).await?;
+            return Err(ErrorObject::new(
+                ErrorKind::Cancelled,
+                "the session was stopped or cancelled while it started",
+            ));
+        }
+        core.terminal = Some(terminal.clone());
+        core.agent = Some(Box::new(TerminalSession(terminal.clone())));
+        let mut change = core.begin();
+        change.commit.event(
+            &core.stream,
+            TerminalOpened {
+                terminal_id: terminal.id().to_owned(),
+            },
+        );
+        change.next.state = SessionState::Idle;
+        core.finish(self, change).await?;
+        let session = core.session.clone();
+        drop(core);
+        info!(
+            session = session.id,
+            terminal = terminal.id(),
+            pid = terminal.pid(),
+            "terminal session ready"
+        );
+        tokio::spawn(terminal_pump(self.clone(), slot, terminal));
+        Ok(session)
     }
 
     /// `session/get`.
@@ -649,6 +757,10 @@ impl Sessions {
         slot.stop.cancel();
         let mut core = slot.core.lock().await;
         core.stop(self, "archived").await?;
+        // Its last screen goes too.
+        if let Some(terminal) = &core.terminal {
+            self.terminals.remove(terminal.id());
+        }
         if core.session.archived {
             return Ok(());
         }
@@ -1186,6 +1298,12 @@ impl Core {
         ctx: &Sessions,
         content: Vec<ContentBlock>,
     ) -> Result<String, ErrorObject> {
+        if self.session.mode == SessionMode::Terminal {
+            return Err(ErrorObject::new(
+                ErrorKind::InvalidState,
+                "a terminal session takes its input through terminal/input",
+            ));
+        }
         if self.agent.is_none() {
             return Err(ErrorObject::new(
                 ErrorKind::InvalidState,
@@ -1338,6 +1456,15 @@ impl Core {
         agent.stop().await;
         drop(agent);
         let mut change = self.begin();
+        if let Some(terminal) = &self.terminal {
+            change.commit.event(
+                &self.stream,
+                TerminalClosed {
+                    terminal_id: terminal.id().to_owned(),
+                    exit_code: terminal.exit().and_then(|exit| exit.exit_code),
+                },
+            );
+        }
         self.expire_pending(&mut change);
         self.end_turn(
             &mut change,
@@ -1470,6 +1597,98 @@ async fn pump(
             break;
         }
     }
+}
+
+/// Waits for a terminal session's program to end by itself, then ends the session: `stopped`
+/// for exit code 0, `failed` otherwise. A session stopped meanwhile was ended by its stop.
+async fn terminal_pump(sessions: Arc<Sessions>, slot: Arc<Slot>, terminal: Arc<Terminal>) {
+    let exit = terminal.closed().await;
+    let mut core = slot.core.lock().await;
+    if core.agent.take().is_none() {
+        return;
+    }
+    let mut change = core.begin();
+    change.commit.event(
+        &core.stream,
+        TerminalClosed {
+            terminal_id: terminal.id().to_owned(),
+            exit_code: exit.exit_code,
+        },
+    );
+    let (state, reason) = match exit.exit_code {
+        Some(0) => (SessionState::Stopped, "the program exited".to_owned()),
+        Some(code) => (
+            SessionState::Failed,
+            format!("the program exited with code {code}"),
+        ),
+        None => (
+            SessionState::Failed,
+            "the program ended; its exit code is unknown".to_owned(),
+        ),
+    };
+    info!(session = core.session.id, terminal = terminal.id(), ?exit.exit_code, "the terminal's program ended");
+    change.next.state = state;
+    change.next.reason = Some(reason);
+    if let Err(error) = core.finish(&sessions, change).await {
+        warn!(session = core.session.id, %error, "ending the terminal session failed");
+    }
+}
+
+/// A terminal session's handle in its core: there are no turns, models or modes to drive, only
+/// a terminal to stop. Dropping it kills the program's tree.
+struct TerminalSession(Arc<Terminal>);
+
+impl AgentSession for TerminalSession {
+    fn prompt(&self, _content: Vec<ContentBlock>) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async {
+            Err(AgentError::InvalidState(
+                "a terminal session takes its input through terminal/input".into(),
+            ))
+        })
+    }
+
+    fn cancel(&self) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn set_model(&self, _model: String) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async {
+            Err(AgentError::InvalidState(
+                "a terminal session's model is chosen in the agent's TUI".into(),
+            ))
+        })
+    }
+
+    fn set_agent_mode(&self, _mode: String) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async {
+            Err(AgentError::InvalidState(
+                "a terminal session's mode is chosen in the agent's TUI".into(),
+            ))
+        })
+    }
+
+    fn stop(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            self.0.stop().await;
+        })
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        self.0.kill();
+    }
+}
+
+/// The terminal a terminal session's stream announced, from its first events.
+async fn terminal_of(hub: &Hub, stream: &StreamName) -> Result<Option<String>, HubError> {
+    let events = hub.read(stream.clone(), 0, 16).await?;
+    Ok(events
+        .iter()
+        .find_map(|event| match event.payload::<Event>() {
+            Ok(Event::TerminalOpened(opened)) => Some(opened.terminal_id),
+            _ => None,
+        }))
 }
 
 /// Starts the agent, then switches it to the mode `session/create` asked for. If that fails, the

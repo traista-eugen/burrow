@@ -6,10 +6,12 @@
 //! script is described in [`agent`].
 //!
 //! `burrowd --dev` registers the fake as agent `fake`, looking for `burrow-fake-agent.exe` next
-//! to its own executable.
+//! to its own executable. In a terminal session, agent `fake` runs the same program as a fake
+//! TUI ([`tui`]).
 
 pub mod agent;
 pub mod content;
+pub mod tui;
 pub mod wire;
 
 use std::collections::HashMap;
@@ -119,6 +121,18 @@ impl AgentAdapter for FakeAdapter {
 
     fn start(&self, config: SessionConfig) -> BoxFuture<'_, Result<StartedSession, AgentError>> {
         Box::pin(start(self.program.clone(), config))
+    }
+
+    /// The fake TUI: `burrow-fake-agent --tui`.
+    fn terminal(&self, config: &SessionConfig) -> Result<LaunchSpec, AgentError> {
+        if !self.program.is_file() {
+            return Err(AgentError::Unavailable(format!(
+                "{} doesn't exist",
+                self.program.display()
+            )));
+        }
+        let spec = LaunchSpec::new(&self.program, ["--tui"], "fake");
+        Ok(crate::terminal::for_session(spec, config))
     }
 }
 

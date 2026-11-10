@@ -61,6 +61,8 @@ use self::install::Npm;
 use self::session::{Launcher, Timing};
 use crate::adapter::{AgentAdapter, AgentError, SessionConfig, StartedSession};
 use crate::detect::{self, CliAgent};
+use crate::launcher::LaunchSpec;
+use crate::terminal;
 
 /// The id `burrowd --dev` gives the fake ACP agent.
 pub const FAKE_ACP_ID: &str = "fake-acp";
@@ -311,6 +313,21 @@ impl AgentAdapter for AcpAdapter {
             };
             session::start(launcher, config).await
         })
+    }
+
+    fn terminal(&self, config: &SessionConfig) -> Result<LaunchSpec, AgentError> {
+        let spec = match self.id {
+            AgentId::Claude => terminal::claude()?,
+            AgentId::Codex => terminal::codex()?,
+            AgentId::Cursor => terminal::cursor(cursor_dir())?,
+            _ => {
+                return Err(AgentError::Unavailable(format!(
+                    "{} has no terminal mode",
+                    self.name
+                )));
+            }
+        };
+        Ok(terminal::for_session(spec, config))
     }
 
     fn install(&self) -> BoxFuture<'_, Result<(), AgentError>> {

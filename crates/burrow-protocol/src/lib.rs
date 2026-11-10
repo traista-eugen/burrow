@@ -19,6 +19,7 @@
 //! - [`agent`]: `agent/list`, `agent/refresh`, `agent/install`, `usage/get`, [`AgentInfo`] and [`AgentId`].
 //! - [`session`]: `session/*`, [`Session`], [`ContentBlock`] and the session events.
 //! - [`inbox`]: `inbox/*` and [`InboxItem`].
+//! - [`terminal`]: `terminal/*`, and the screen they carry: [`TerminalLine`], [`TerminalRun`].
 //! - [`artifact`]: references to files in the artifact store, [`ArtifactRef`].
 //! - [`debug`]: `debug/append`, a development-only method.
 //! - [`time`]: [`Timestamp`], which always serializes as `2026-11-06T14:03:22.418Z`.
@@ -52,6 +53,7 @@ pub mod method;
 pub mod project;
 pub mod schema;
 pub mod session;
+pub mod terminal;
 pub mod time;
 
 pub use agent::{
@@ -91,9 +93,15 @@ pub use session::{
     PermissionResolved, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, Session,
     SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
     SessionPromptResult, SessionRenameParams, SessionSetAgentModeParams, SessionSetModelParams,
-    SessionState, SessionSummary, SessionUsage, StateChanged, TerminalOpened, ToolCall,
-    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind, TurnEndReason,
-    TurnEnded, Usage, UserMessage,
+    SessionState, SessionSummary, SessionUsage, StateChanged, TerminalClosed, TerminalOpened,
+    ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
+    TurnEndReason, TurnEnded, Usage, UserMessage,
+};
+pub use terminal::{
+    Color, CursorShape, MouseTracking, TerminalClosedParams, TerminalCursor, TerminalExit,
+    TerminalIdParams, TerminalInputParams, TerminalLine, TerminalModes, TerminalResizeParams,
+    TerminalRun, TerminalScrollbackParams, TerminalScrollbackResult, TerminalSize,
+    TerminalSnapshot, TerminalUpdate,
 };
 pub use time::Timestamp;
 

@@ -15,7 +15,13 @@
 //! Programs are found with [`find_program`], which knows Windows' shims: npm's `claude.cmd`, or
 //! Cursor's `agent.cmd`. Batch files run through `cmd.exe`; the standard library quotes their
 //! arguments for `cmd.exe` and refuses arguments it can't pass safely.
+//!
+//! [`spawn_pty`] starts a TUI on a pseudo console instead (ConPTY), created inside its Job Object
+//! with `PROC_THREAD_ATTRIBUTE_JOB_LIST` (D-038). Its stdio is the console: the screen comes out
+//! of [`PtyProcess::output`] as VT sequences, and keystrokes go into [`PtyProcess::input`].
 
+#[cfg(windows)]
+mod conpty;
 mod resolve;
 #[cfg(windows)]
 mod windows;
@@ -56,6 +62,9 @@ pub struct LaunchSpec {
     pub label: String,
     /// Give the child a null stdin instead of a pipe, for commands that read nothing.
     pub null_stdin: bool,
+    /// Environment variables to remove from `burrowd`'s environment, for example the ones that
+    /// name the terminal `burrowd` was started from.
+    pub env_remove: Vec<OsString>,
 }
 
 impl LaunchSpec {
@@ -72,6 +81,7 @@ impl LaunchSpec {
             env: Vec::new(),
             label: label.into(),
             null_stdin: false,
+            env_remove: Vec::new(),
         }
     }
 
@@ -84,6 +94,12 @@ impl LaunchSpec {
     /// Sets an environment variable.
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Removes an environment variable inherited from `burrowd`.
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.env_remove.push(key.into());
         self
     }
 }
@@ -258,6 +274,9 @@ pub fn spawn(spec: &LaunchSpec) -> io::Result<AgentProcess> {
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
+    for key in &spec.env_remove {
+        command.env_remove(key);
+    }
     for (key, value) in &spec.env {
         command.env(key, value);
     }
@@ -304,6 +323,96 @@ pub fn spawn(spec: &LaunchSpec) -> io::Result<AgentProcess> {
         stdin,
         stdout,
     })
+}
+
+/// A pseudo console's size, in character cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PtySize {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+}
+
+/// A program running on a pseudo console, inside its own Job Object (D-038).
+#[derive(Debug)]
+pub struct PtyProcess {
+    /// Stops the tree and watches the main process, as for [`spawn`]. It has no stderr: the
+    /// program writes everything to the console.
+    pub handle: ProcessHandle,
+    /// The console's screen, as VT sequences. Reads block; read it on a thread of its own, and
+    /// keep reading until it ends, which it does once the console is closed.
+    pub output: std::fs::File,
+    /// The console's keyboard: what is written here reaches the program as typed input. Writes
+    /// block while the program doesn't read.
+    pub input: std::fs::File,
+    /// Resizes and closes the console.
+    pub console: PseudoConsole,
+}
+
+/// The pseudo console a [`PtyProcess`] runs on. Cheap to clone; the console closes when
+/// [`PseudoConsole::close`] is called or the last clone is dropped.
+#[derive(Clone, Debug)]
+pub struct PseudoConsole {
+    #[cfg(windows)]
+    inner: Arc<conpty::Console>,
+}
+
+impl PseudoConsole {
+    /// Changes the console's size; the program sees a window-size change.
+    pub fn resize(&self, size: PtySize) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.resize(size)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = size;
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    /// Closes the console: its host paints a last frame into the output and exits, after which
+    /// reading the output ends. The output must still be read meanwhile, or this can block until
+    /// it is. Closing again does nothing.
+    pub fn close(&self) {
+        #[cfg(windows)]
+        self.inner.close();
+    }
+}
+
+/// Starts `spec` on a new pseudo console of `size`, created inside a new kill-on-close Job
+/// Object, so nothing it starts can escape the job. `spec.null_stdin` doesn't apply: the
+/// console is the program's stdio.
+///
+/// Must be called on a tokio runtime, like [`spawn`].
+pub fn spawn_pty(spec: &LaunchSpec, size: PtySize) -> io::Result<PtyProcess> {
+    #[cfg(windows)]
+    {
+        let spawned = conpty::spawn_pty(spec, size)?;
+        Ok(PtyProcess {
+            handle: ProcessHandle {
+                pid: spawned.pid,
+                label: spec.label.as_str().into(),
+                job: Arc::new(spawned.job),
+                exit: spawned.exit,
+                stderr: Arc::default(),
+            },
+            output: spawned.output,
+            input: spawned.input,
+            console: PseudoConsole {
+                inner: spawned.console,
+            },
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (spec, size);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terminal sessions are Windows-only for now",
+        ))
+    }
 }
 
 async fn read_stderr(pipe: ChildStderr, label: Arc<str>, tail: Arc<Mutex<VecDeque<String>>>) {

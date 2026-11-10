@@ -12,6 +12,12 @@
 //! - **The writer** drains a bounded queue of outgoing lines into the pipe, several at a time.
 //! - **One forwarder per subscription** replays history from the store in pages, then forwards
 //!   live events, dropping any seq it has already sent.
+//! - **Terminals.** `terminal/attach`, `terminal/detach`, `terminal/input` and `terminal/resize`
+//!   are handled by the reader in order too: keystrokes must reach the program in the order they
+//!   were typed. Each attachment has a task that sends its `terminal/update`s
+//!   ([`crate::terminals::client`]), one at a time, each once the previous one is written
+//!   (D-039). The connection keeps the size each attachment last asked for, for the "latest
+//!   wins" resize rule (D-040).
 //!
 //! A client that stops reading fills the outgoing queue, then its subscriptions' live buffers.
 //! When a live buffer overflows, the connection is closed; the client reconnects and resumes from
@@ -22,16 +28,20 @@ use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use burrow_protocol::methods::{EventsSubscribe, EventsUnsubscribe, Initialize};
+use burrow_protocol::methods::{
+    EventsSubscribe, EventsUnsubscribe, Initialize, TerminalAttach, TerminalDetach, TerminalInput,
+    TerminalResize, TerminalScrollback,
+};
 use burrow_protocol::notifications::Cancel as CancelNotification;
 use burrow_protocol::{
     Empty, ErrorKind, ErrorObject, InitializeParams, InitializeResult, Message, Method,
     Notification, NotificationMethod, PROTOCOL_VERSION, Request, RequestId, Response,
-    ServerCapabilities, ServerInfo, StreamName, SubscribeParams, SubscribeResult,
+    ServerCapabilities, ServerInfo, StreamName, SubscribeParams, SubscribeResult, TerminalIdParams,
+    TerminalInputParams, TerminalResizeParams, TerminalSize,
 };
 use burrow_transport::{LineReader, push_line};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
@@ -40,6 +50,8 @@ use crate::cancel::Cancel;
 use crate::hub::{Hub, LiveEvent};
 use crate::projects::Projects;
 use crate::sessions::Sessions;
+use crate::terminals::Terminals;
+use crate::terminals::client::{PageRequest, Updates};
 use crate::{ids, methods, wire};
 
 /// Lines waiting to be written to one client.
@@ -67,6 +79,41 @@ pub struct Context {
     pub agents: Arc<Agents>,
     /// Sessions and the inbox.
     pub sessions: Arc<Sessions>,
+    /// Terminals.
+    pub terminals: Arc<Terminals>,
+}
+
+/// A line for the writer, and whom to tell once it is in the pipe.
+#[derive(Debug)]
+pub struct Outgoing {
+    line: Arc<str>,
+    written: Option<oneshot::Sender<()>>,
+}
+
+impl Outgoing {
+    /// A line whose sender wants to know when it has been written, so that it can send its next
+    /// one only then (terminal updates, D-039).
+    pub fn tracked(line: Arc<str>, written: oneshot::Sender<()>) -> Self {
+        Self {
+            line,
+            written: Some(written),
+        }
+    }
+}
+
+impl From<Arc<str>> for Outgoing {
+    fn from(line: Arc<str>) -> Self {
+        Self {
+            line,
+            written: None,
+        }
+    }
+}
+
+impl From<String> for Outgoing {
+    fn from(line: String) -> Self {
+        Self::from(Arc::<str>::from(line))
+    }
 }
 
 /// Serves one client until it disconnects or has to be disconnected.
@@ -96,6 +143,7 @@ where
         close: close.clone(),
         initialized: false,
         subscriptions: HashMap::new(),
+        attachments: HashMap::new(),
         in_flight: Arc::default(),
         permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
     };
@@ -135,23 +183,29 @@ impl fmt::Display for Closed {
     }
 }
 
-/// Writes queued lines to the client, batching whatever is already waiting.
+/// Writes queued lines to the client, batching whatever is already waiting, and tells the
+/// senders that asked once their lines are written.
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
-    mut queue: mpsc::Receiver<Arc<str>>,
+    mut queue: mpsc::Receiver<Outgoing>,
 ) -> io::Result<()> {
     let mut buffer = Vec::with_capacity(WRITE_BATCH_BYTES);
-    while let Some(line) = queue.recv().await {
+    let mut written = Vec::new();
+    while let Some(first) = queue.recv().await {
         buffer.clear();
-        push_line(&mut buffer, &line);
-        while buffer.len() < WRITE_BATCH_BYTES {
-            match queue.try_recv() {
-                Ok(line) => push_line(&mut buffer, &line),
-                Err(_) => break,
+        let mut next = Some(first);
+        while let Some(outgoing) = next.take() {
+            push_line(&mut buffer, &outgoing.line);
+            written.extend(outgoing.written);
+            if buffer.len() < WRITE_BATCH_BYTES {
+                next = queue.try_recv().ok();
             }
         }
         writer.write_all(&buffer).await?;
         writer.flush().await?;
+        for done in written.drain(..) {
+            let _ = done.send(());
+        }
     }
     Ok(())
 }
@@ -163,10 +217,12 @@ struct Gone;
 struct Connection {
     id: String,
     context: Arc<Context>,
-    out: mpsc::Sender<Arc<str>>,
+    out: mpsc::Sender<Outgoing>,
     close: Arc<Notify>,
     initialized: bool,
     subscriptions: HashMap<StreamName, Subscription>,
+    /// Attached terminals, by id.
+    attachments: HashMap<String, Attachment>,
     /// Requests running on their own tasks, by id, with the flag `$/cancel` sets.
     in_flight: Arc<Mutex<HashMap<RequestId, Cancel>>>,
     permits: Arc<Semaphore>,
@@ -257,6 +313,44 @@ impl Connection {
                 };
                 self.reply::<EventsUnsubscribe>(id, result).await
             }
+            TerminalAttach::NAME => match request.params_as::<TerminalAttach>() {
+                Ok(params) => self.attach(id, params).await,
+                Err(error) => self.reply::<TerminalAttach>(id, Err(error)).await,
+            },
+            TerminalDetach::NAME => {
+                let result = match request.params_as::<TerminalDetach>() {
+                    Ok(params) => {
+                        self.detach(&params.terminal_id).await;
+                        Ok(Empty {})
+                    }
+                    Err(error) => Err(error),
+                };
+                self.reply::<TerminalDetach>(id, result).await
+            }
+            TerminalInput::NAME => {
+                let result = request
+                    .params_as::<TerminalInput>()
+                    .and_then(|params| self.terminal_input(params));
+                self.reply::<TerminalInput>(id, result).await
+            }
+            TerminalResize::NAME => {
+                let result = request
+                    .params_as::<TerminalResize>()
+                    .and_then(|params| self.terminal_resize(params));
+                self.reply::<TerminalResize>(id, result).await
+            }
+            // An attached client's pages come from its update task, in order with its updates;
+            // anyone else's are relative to the screen now.
+            TerminalScrollback::NAME => match request.params_as::<TerminalScrollback>() {
+                Ok(params) => {
+                    let attachment = self.attachments.get(&params.terminal_id);
+                    match attachment.map(|attachment| attachment.pages.send((id, params))) {
+                        Some(Ok(())) => Ok(()),
+                        Some(Err(_)) | None => self.spawn_request(request).await,
+                    }
+                }
+                Err(error) => self.reply::<TerminalScrollback>(id, Err(error)).await,
+            },
             _ => self.spawn_request(request).await,
         }
     }
@@ -429,6 +523,107 @@ impl Connection {
             debug!(%stream, "unsubscribed");
         }
     }
+
+    /// `terminal/attach`: answers with the whole screen, then starts the updates, so the answer
+    /// always comes before the first `terminal/update`.
+    async fn attach(&mut self, id: RequestId, params: TerminalIdParams) -> Result<(), Gone> {
+        if self.attachments.contains_key(&params.terminal_id) {
+            let error = ErrorObject::new(
+                ErrorKind::InvalidState,
+                format!("already attached to {}; detach first", params.terminal_id),
+            );
+            return self.reply::<TerminalAttach>(id, Err(error)).await;
+        }
+        let terminal = match self.context.terminals.get(&params.terminal_id) {
+            Ok(terminal) => terminal,
+            Err(error) => return self.reply::<TerminalAttach>(id, Err(error)).await,
+        };
+        let (snapshot, frame, changed) = terminal.attach();
+        let closed = snapshot.exit.is_some();
+        self.reply::<TerminalAttach>(id, Ok(snapshot)).await?;
+        let (pages, requests) = mpsc::unbounded_channel();
+        // A closed terminal changes no more: nothing to send.
+        let task = (!closed).then(|| {
+            let updates = Updates {
+                terminal,
+                sent: frame,
+                changed,
+                requests,
+                out: self.out.clone(),
+            };
+            tokio::spawn(updates.run().in_current_span())
+        });
+        debug!(terminal = params.terminal_id, "attached");
+        self.attachments.insert(
+            params.terminal_id,
+            Attachment {
+                task,
+                pages,
+                wanted: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// `terminal/detach`: stops the updates before answering, so none follows the answer.
+    /// Detaching a terminal that isn't attached does nothing.
+    async fn detach(&mut self, terminal_id: &str) {
+        if let Some(mut attachment) = self.attachments.remove(terminal_id) {
+            if let Some(task) = attachment.task.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            debug!(terminal = terminal_id, "detached");
+        }
+    }
+
+    /// `terminal/input`. Under "latest wins" (D-040), a client that types gets the size it last
+    /// asked for.
+    fn terminal_input(&mut self, params: TerminalInputParams) -> Result<Empty, ErrorObject> {
+        let terminal = self.context.terminals.get(&params.terminal_id)?;
+        if let Some(wanted) = self
+            .attachments
+            .get(&params.terminal_id)
+            .and_then(|attachment| attachment.wanted)
+            && terminal.exit().is_none()
+        {
+            terminal.resize(wanted)?;
+        }
+        terminal.input(params.data.as_bytes())?;
+        Ok(Empty {})
+    }
+
+    /// `terminal/resize`: sets the size, and remembers it as what this client wants.
+    fn terminal_resize(&mut self, params: TerminalResizeParams) -> Result<Empty, ErrorObject> {
+        let terminal = self.context.terminals.get(&params.terminal_id)?;
+        let size = TerminalSize {
+            cols: params.cols,
+            rows: params.rows,
+        };
+        terminal.resize(size)?;
+        if let Some(attachment) = self.attachments.get_mut(&params.terminal_id) {
+            attachment.wanted = Some(size);
+        }
+        Ok(Empty {})
+    }
+}
+
+/// One attached terminal. Dropping it stops its updates.
+struct Attachment {
+    /// Sends the updates; `None` for a terminal that was closed when attached.
+    task: Option<JoinHandle<()>>,
+    /// The client's `terminal/scrollback` requests, for the task to answer.
+    pages: mpsc::UnboundedSender<PageRequest>,
+    /// The size this client last asked for with `terminal/resize` (D-040).
+    wanted: Option<TerminalSize>,
+}
+
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -478,7 +673,7 @@ enum Stop {
 struct Forwarder {
     stream: StreamName,
     hub: Hub,
-    out: mpsc::Sender<Arc<str>>,
+    out: mpsc::Sender<Outgoing>,
     close: Arc<Notify>,
     /// The last seq sent, or the position the subscription started from.
     delivered: u64,
@@ -569,7 +764,10 @@ impl Forwarder {
     }
 
     async fn deliver(&mut self, seq: u64, line: Arc<str>) -> Result<(), Stop> {
-        self.out.send(line).await.map_err(|_| Stop::Disconnected)?;
+        self.out
+            .send(line.into())
+            .await
+            .map_err(|_| Stop::Disconnected)?;
         self.delivered = seq;
         Ok(())
     }

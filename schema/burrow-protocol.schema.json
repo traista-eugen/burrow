@@ -424,6 +424,20 @@
       ],
       "type": "string"
     },
+    "Color": {
+      "description": "A colour: a palette index (0–15 are the themeable ANSI colours, 16–255 xterm's cube and grey ramp), or a 24-bit colour as \"#rrggbb\".",
+      "oneOf": [
+        {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        }
+      ]
+    },
     "ContentBlock": {
       "description": "A piece of prompt or message content. Follows ACP, except that images are artifact references instead of inline data.",
       "oneOf": [
@@ -482,6 +496,35 @@
           "type": "object"
         }
       ]
+    },
+    "CursorShape": {
+      "description": "How the cursor is drawn.",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "A filled block over the cell."
+        },
+        {
+          "const": "underline",
+          "description": "A line under the cell."
+        },
+        {
+          "const": "bar",
+          "description": "A vertical bar before the cell."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "block",
+              "underline",
+              "bar"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
     },
     "DebugAppendParams": {
       "description": "`debug/append` params: append one event to a stream.",
@@ -879,6 +922,9 @@
         },
         {
           "$ref": "#/$defs/TerminalOpened"
+        },
+        {
+          "$ref": "#/$defs/TerminalClosed"
         },
         {
           "$ref": "#/$defs/UnknownEvent"
@@ -1544,6 +1590,35 @@
         "id"
       ],
       "type": "object"
+    },
+    "MouseTracking": {
+      "description": "Which mouse events the program wants reported.",
+      "oneOf": [
+        {
+          "const": "click",
+          "description": "Presses and releases (mode 1000)."
+        },
+        {
+          "const": "drag",
+          "description": "Presses, releases, and motion while a button is held (mode 1002)."
+        },
+        {
+          "const": "motion",
+          "description": "Presses, releases and all motion (mode 1003)."
+        },
+        {
+          "description": "A value added by a newer protocol revision. Keep it and pass it on.",
+          "not": {
+            "enum": [
+              "click",
+              "drag",
+              "motion"
+            ]
+          },
+          "type": "string"
+        }
+      ],
+      "type": "string"
     },
     "Notification": {
       "description": "A one-way message. It gets no response.",
@@ -2282,7 +2357,7 @@
         "mode": {
           "$ref": "#/$defs/SessionMode",
           "default": "structured",
-          "description": "Structured (the default) or terminal. Terminal sessions are `unavailable` until M4."
+          "description": "Structured (the default) or terminal. A terminal session runs the agent's own TUI; its stream announces the terminal with `terminalOpened`, and it takes no `model` or `agentMode`."
         },
         "model": {
           "description": "The model to use; the agent's default when absent.",
@@ -2378,7 +2453,7 @@
         },
         {
           "const": "terminal",
-          "description": "The agent's own TUI in a pseudo-terminal. Not available until M4.",
+          "description": "The agent's own TUI in a pseudo-terminal, emulated by `burrowd`. Clients draw it through `terminal/attach`; the session's stream says which terminal with `terminalOpened`.",
           "type": "string"
         }
       ]
@@ -2723,11 +2798,207 @@
       ],
       "type": "object"
     },
-    "TerminalOpened": {
-      "description": "`terminalOpened`: a terminal belongs to this session (M4).",
+    "TerminalClosed": {
+      "description": "`terminalClosed`: the terminal's program ended, by itself or because the session stopped. Comes just before the `stateChanged` that ends the session.",
+      "properties": {
+        "exitCode": {
+          "description": "The program's exit code. Absent when Burrow ended it: `session/stop`, `session/archive`, or `burrowd` stopping.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminalId": {
+          "description": "The terminal's id.",
+          "type": "string"
+        },
+        "type": {
+          "const": "terminalClosed"
+        }
+      },
+      "required": [
+        "type",
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalClosedParams": {
+      "description": "`terminal/closed`: the terminal's program exited. Sent after the last `terminal/update`. The attachment stays until `terminal/detach`, and the scrollback can still be read.",
+      "properties": {
+        "exitCode": {
+          "description": "The program's exit code. Absent when Burrow ended it.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalCursor": {
+      "description": "Where the cursor is and how it looks.",
+      "properties": {
+        "col": {
+          "description": "The column, from `0` at the left. On a wide character, its first cell.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row": {
+          "description": "The row, from `0` at the top of the screen.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shape": {
+          "$ref": "#/$defs/CursorShape",
+          "description": "Its shape."
+        },
+        "visible": {
+          "description": "Whether the program shows it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "row",
+        "col",
+        "visible",
+        "shape"
+      ],
+      "type": "object"
+    },
+    "TerminalExit": {
+      "description": "How a terminal's program ended.",
+      "properties": {
+        "exitCode": {
+          "description": "The program's exit code. Absent when Burrow ended it, for example on `session/stop`.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TerminalIdParams": {
+      "description": "Params naming one terminal: `terminal/attach`, `terminal/detach`.",
       "properties": {
         "terminalId": {
-          "description": "The terminal's id, for `terminal/attach`.",
+          "description": "The terminal's id (`trm_…`), from `terminalOpened` or `Session.terminalId`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalInputParams": {
+      "description": "`terminal/input` params.",
+      "properties": {
+        "data": {
+          "description": "What the user typed, as a terminal sends it: UTF-8 text, with escape sequences for special keys, encoded for the terminal's current modes (`TerminalModes`).",
+          "type": "string"
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId",
+        "data"
+      ],
+      "type": "object"
+    },
+    "TerminalLine": {
+      "description": "One line of a terminal.",
+      "properties": {
+        "index": {
+          "description": "Where the line is: `0` is the top row of the screen; `-1` is the scrollback line just above it, `-2` the one above that, and so on.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "runs": {
+          "description": "The line's text, left to right. The cells after the last run are blank. Empty for a blank line.",
+          "items": {
+            "$ref": "#/$defs/TerminalRun"
+          },
+          "type": "array"
+        },
+        "wrapped": {
+          "description": "The line is soft-wrapped: its text goes on in the next line, so copying joins the two without a line break.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "index",
+        "runs"
+      ],
+      "type": "object"
+    },
+    "TerminalModes": {
+      "description": "The modes that change what a client sends as input. Each is off when absent.",
+      "properties": {
+        "altScreen": {
+          "description": "The alternate screen is shown: it has no scrollback.",
+          "type": "boolean"
+        },
+        "alternateScroll": {
+          "description": "On the alternate screen, the mouse wheel should send Up and Down keys (mode 1007).",
+          "type": "boolean"
+        },
+        "appCursor": {
+          "description": "Application cursor keys (DECCKM): the arrow keys, Home and End send `ESC O A` and so on, instead of `ESC [ A`.",
+          "type": "boolean"
+        },
+        "appKeypad": {
+          "description": "Application keypad (DECKPAM): the numeric keypad sends `ESC O …` sequences.",
+          "type": "boolean"
+        },
+        "bracketedPaste": {
+          "description": "Bracketed paste: wrap pasted text in `ESC [200~` and `ESC [201~`.",
+          "type": "boolean"
+        },
+        "focusEvents": {
+          "description": "Report focus changes: `ESC [ I` when the terminal gains focus, `ESC [ O` when it loses it.",
+          "type": "boolean"
+        },
+        "mouse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MouseTracking"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which mouse events to report; none when absent."
+        },
+        "mouseSgr": {
+          "description": "Report the mouse in SGR encoding (mode 1006, `ESC [ < b ; x ; y M`); otherwise in the default X10 encoding.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TerminalOpened": {
+      "description": "`terminalOpened`: a terminal belongs to this session. A terminal session's stream has it right after `stateChanged` (`starting`), before the session is `idle`.",
+      "properties": {
+        "terminalId": {
+          "description": "The terminal's id (`trm_…`), for `terminal/attach`.",
           "type": "string"
         },
         "type": {
@@ -2737,6 +3008,287 @@
       "required": [
         "type",
         "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalResizeParams": {
+      "description": "`terminal/resize` params.",
+      "properties": {
+        "cols": {
+          "description": "Columns, 2 to 1000.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "description": "Rows, 1 to 500.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId",
+        "cols",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TerminalRun": {
+      "description": "A piece of a line's text in one style.",
+      "properties": {
+        "bg": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The background colour; the theme's default when absent."
+        },
+        "fg": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The foreground colour; the theme's default when absent."
+        },
+        "flags": {
+          "description": "Style bits: 1 bold, 2 italic, 4 underline, 8 inverse, 16 dim, 32 strikethrough, 64 hidden, 128 undercurl. Absent means none. Unknown bits must be ignored.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "The text. A wide character is written once and takes two cells.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "TerminalScrollbackParams": {
+      "description": "`terminal/scrollback` params: a page of the lines above the screen.",
+      "properties": {
+        "before": {
+          "description": "Lines above this index: `0` (the default) pages back from the newest scrollback line, and the oldest index a client has pages on from there. For a client attached to the terminal, indexes are relative to the screen as that client has it: the answer comes in order with its updates.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "At most this many. Default 100, at most 1000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalScrollbackResult": {
+      "description": "`terminal/scrollback` result.",
+      "properties": {
+        "complete": {
+          "description": "No older line is kept: the oldest of `lines` is the oldest there is, or there are none.",
+          "type": "boolean"
+        },
+        "lines": {
+          "description": "The lines, oldest first, at their (negative) indexes: the `limit` lines just above `before`, or fewer.",
+          "items": {
+            "$ref": "#/$defs/TerminalLine"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lines",
+        "complete"
+      ],
+      "type": "object"
+    },
+    "TerminalSnapshot": {
+      "description": "The whole screen, as `terminal/attach` returns it.",
+      "properties": {
+        "cols": {
+          "description": "Columns.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "$ref": "#/$defs/TerminalCursor",
+          "description": "The cursor."
+        },
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalExit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present once the program has exited; no updates follow then."
+        },
+        "lines": {
+          "description": "Every row of the screen, top to bottom: `index` 0 to `rows - 1`. No scrollback: page it with `terminal/scrollback`.",
+          "items": {
+            "$ref": "#/$defs/TerminalLine"
+          },
+          "type": "array"
+        },
+        "modes": {
+          "$ref": "#/$defs/TerminalModes",
+          "description": "The modes that change what the client sends."
+        },
+        "rows": {
+          "description": "Rows.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scrollback": {
+          "description": "How many scrollback lines `burrowd` keeps above the screen: lines `-scrollback` to `-1`. At most 10,000. Zero on the alternate screen.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The title the program set, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "terminalId",
+        "cols",
+        "rows",
+        "cursor",
+        "lines",
+        "modes",
+        "scrollback"
+      ],
+      "type": "object"
+    },
+    "TerminalUpdate": {
+      "description": "`terminal/update`: what changed since the client's previous snapshot or update. At most one per client every 16 ms or so; a burst of output is coalesced, and a client that reads slowly gets the latest state, never a backlog.\n\nA client applies it in this order:\n\n1. With `reset`: the size is `cols` × `rows`; the client drops its screen and its scrollback,    and `lines` holds every row. The scrollback can be paged again. 2. Otherwise, with `scrolled`: the top `scrolled` rows move into the scrollback (the old top    row becomes line `-scrolled`, the old row `scrolled - 1` line `-1`), the rows below move    up, and blank rows fill the bottom. Scrolled lines the client never had (more than the    screen held) are blank until `lines` fills them. 3. Each of `lines` replaces the line at its index: rows that differ after the move, and    scrollback lines that differ from the client's copy, such as a row that changed just    before it scrolled off.",
+      "properties": {
+        "bell": {
+          "description": "The bell rang since the previous update.",
+          "type": "boolean"
+        },
+        "cols": {
+          "description": "Columns, with `reset`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cursor": {
+          "$ref": "#/$defs/TerminalCursor",
+          "description": "The cursor, always."
+        },
+        "lines": {
+          "description": "Lines that changed, each replaced whole: screen rows and scrollback lines.",
+          "items": {
+            "$ref": "#/$defs/TerminalLine"
+          },
+          "type": "array"
+        },
+        "modes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalModes"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The modes, when any changed."
+        },
+        "reset": {
+          "description": "The screen and the scrollback start afresh: after a resize, or when `burrowd` lost track of which lines scrolled. `cols`, `rows` and every row come with it.",
+          "type": "boolean"
+        },
+        "rows": {
+          "description": "Rows, with `reset`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scrollback": {
+          "description": "How many scrollback lines `burrowd` keeps, when that changed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scrolled": {
+          "description": "How many lines scrolled off the top of the screen into the scrollback since the previous update, before `lines` apply. Absent means none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminalId": {
+          "description": "The terminal.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The title, when it changed; empty when the program cleared it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "terminalId",
+        "lines",
+        "cursor"
       ],
       "type": "object"
     },
@@ -3148,7 +3700,8 @@
               "stateChanged",
               "modelChanged",
               "agentModeChanged",
-              "terminalOpened"
+              "terminalOpened",
+              "terminalClosed"
             ]
           },
           "type": "string"
@@ -3474,6 +4027,46 @@
         "$ref": "#/$defs/Empty"
       }
     },
+    "terminal/attach": {
+      "params": {
+        "$ref": "#/$defs/TerminalIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TerminalSnapshot"
+      }
+    },
+    "terminal/detach": {
+      "params": {
+        "$ref": "#/$defs/TerminalIdParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "terminal/input": {
+      "params": {
+        "$ref": "#/$defs/TerminalInputParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "terminal/resize": {
+      "params": {
+        "$ref": "#/$defs/TerminalResizeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "terminal/scrollback": {
+      "params": {
+        "$ref": "#/$defs/TerminalScrollbackParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TerminalScrollbackResult"
+      }
+    },
     "usage/get": {
       "params": {
         "$ref": "#/$defs/Empty"
@@ -3495,6 +4088,16 @@
     "events/event": {
       "params": {
         "$ref": "#/$defs/StreamEvent"
+      }
+    },
+    "terminal/closed": {
+      "params": {
+        "$ref": "#/$defs/TerminalClosedParams"
+      }
+    },
+    "terminal/update": {
+      "params": {
+        "$ref": "#/$defs/TerminalUpdate"
       }
     }
   },

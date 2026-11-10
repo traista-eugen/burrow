@@ -685,12 +685,15 @@ async fn models_archives_and_bad_requests() {
         types(&turn)
     );
 
-    // Bad requests.
+    // Bad requests. A terminal session's model is chosen in its TUI (tests/terminals.rs has the
+    // rest of terminal sessions).
     let mut terminal = create_params(dir.path());
     terminal.mode = SessionMode::Terminal;
-    assert_eq!(
-        error_kind(client.call::<SessionCreate>(&terminal).await),
-        ErrorKind::Unavailable
+    terminal.model = Some("fake".into());
+    let refused = client.call::<SessionCreate>(&terminal).await;
+    assert!(
+        matches!(&refused, Err(CallError::Rpc(error)) if error.code == code::INVALID_PARAMS),
+        "{refused:?}"
     );
     let mut unknown = create_params(dir.path());
     unknown.agent = AgentId::Claude;

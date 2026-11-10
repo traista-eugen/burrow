@@ -14,7 +14,7 @@ use burrow_protocol::methods::{
     AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxGet, InboxList, InboxRespond, Ping,
     ProjectAdd, ProjectGet, ProjectList, ProjectRemove, SessionArchive, SessionCancel,
     SessionCreate, SessionGet, SessionList, SessionPrompt, SessionRename, SessionSetAgentMode,
-    SessionSetModel, SessionStop, UsageGet,
+    SessionSetModel, SessionStop, TerminalScrollback, UsageGet,
 };
 use burrow_protocol::{
     DebugAppendParams, DebugAppendResult, Empty, ErrorKind, ErrorObject, Method, Request, Response,
@@ -166,6 +166,14 @@ pub async fn handle(context: &Arc<Context>, request: Request, cancel: Cancel) ->
         InboxRespond::NAME => {
             answer::<InboxRespond, _, _>(&request, |params| c.sessions.inbox_respond(params, LOCAL))
                 .await
+        }
+
+        TerminalScrollback::NAME => {
+            answer::<TerminalScrollback, _, _>(&request, |params| async move {
+                let terminal = c.terminals.get(&params.terminal_id)?;
+                Ok(terminal.page(None, params.before, params.limit))
+            })
+            .await
         }
 
         _ => Response::error(

@@ -7,6 +7,8 @@
 //! burrowctl session new --agent fake
 //! burrowctl session prompt ses_… "Hello" --watch
 //! burrowctl session rename ses_… "Fix the login bug"
+//! burrowctl session new --agent claude --mode terminal --attach
+//! burrowctl terminal attach ses_…
 //! burrowctl inbox respond inb_… allow
 //! burrowctl events tail index --after 0
 //! ```
@@ -14,6 +16,7 @@
 //! Output is readable text; `--json` prints JSON instead, one value per line.
 
 mod render;
+mod terminal;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -24,14 +27,14 @@ use burrow_client::{CallError, Client, ConnectError, ConnectOptions};
 use burrow_protocol::methods::{
     AgentInstall, AgentList, AgentRefresh, DebugAppend, InboxList, InboxRespond, Ping, ProjectAdd,
     ProjectList, SessionArchive, SessionCancel, SessionCreate, SessionList, SessionPrompt,
-    SessionRename, SessionSetAgentMode, SessionSetModel, SessionStop, UsageGet,
+    SessionRename, SessionSetAgentMode, SessionSetModel, SessionStop, TerminalInput, UsageGet,
 };
 use burrow_protocol::{
     AgentId, AgentInstallParams, ClientInfo, ClientKind, ContentBlock, DebugAppendParams, Empty,
     Event, InboxItemStatus, InboxListParams, InboxRespondParams, ProjectAddParams,
     SessionCreateParams, SessionIdParams, SessionListParams, SessionMode, SessionPromptParams,
     SessionRenameParams, SessionSetAgentModeParams, SessionSetModelParams, StreamName,
-    SubscribeParams, code,
+    SubscribeParams, TerminalInputParams, code,
 };
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -76,6 +79,9 @@ enum Command {
     /// Things that wait on you, such as permission requests
     #[command(subcommand)]
     Inbox(InboxCommand),
+    /// Terminals: the screens of terminal sessions
+    #[command(subcommand)]
+    Terminal(TerminalCommand),
     /// Event streams
     #[command(subcommand)]
     Events(EventsCommand),
@@ -136,6 +142,12 @@ enum SessionCommand {
         /// A title; otherwise the first prompt's first line
         #[arg(long)]
         title: Option<String>,
+        /// Structured (through ACP or MSP), or terminal: the agent's own TUI in a terminal
+        #[arg(long, value_enum, default_value = "structured")]
+        mode: ModeArg,
+        /// With `--mode terminal`, attach this console to the terminal at once
+        #[arg(long, requires = "mode")]
+        attach: bool,
     },
     /// List sessions, most recently active first
     List {
@@ -199,6 +211,45 @@ enum SessionCommand {
     },
 }
 
+/// `session new --mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ModeArg {
+    Structured,
+    Terminal,
+}
+
+#[derive(Debug, Subcommand)]
+enum TerminalCommand {
+    /// Show a terminal in this console and type into it. Ctrl+] then d detaches
+    Attach {
+        /// The terminal (`trm_…`), or a terminal session (`ses_…`)
+        id: String,
+    },
+    /// Type text into a terminal, as if from a keyboard
+    Send {
+        /// The terminal (`trm_…`), or a terminal session (`ses_…`)
+        id: String,
+        /// The text, sent as it is
+        text: String,
+        /// Press Enter after it
+        #[arg(long)]
+        enter: bool,
+    },
+    /// Print a terminal's screen as plain text
+    Show {
+        /// The terminal (`trm_…`), or a terminal session (`ses_…`)
+        id: String,
+    },
+    /// Print a terminal's scrollback as plain text, oldest first
+    Scrollback {
+        /// The terminal (`trm_…`), or a terminal session (`ses_…`)
+        id: String,
+        /// Only the newest this many lines
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum InboxCommand {
     /// List open inbox items, newest first
@@ -256,6 +307,7 @@ async fn main() -> ExitCode {
         Command::Usage => ctl.usage().await,
         Command::Session(command) => ctl.session(command).await,
         Command::Inbox(command) => ctl.inbox(command).await,
+        Command::Terminal(command) => ctl.terminal(command).await,
         Command::Events(EventsCommand::Tail { stream, after }) => ctl.tail(stream, after).await,
         Command::Debug(DebugCommand::Append { stream, event }) => {
             ctl.debug_append(stream, &event).await
@@ -438,7 +490,12 @@ impl Ctl {
                 cwd,
                 project,
                 title,
+                mode,
+                attach,
             } => {
+                if attach && mode != ModeArg::Terminal {
+                    return Err("--attach needs --mode terminal".into());
+                }
                 let cwd =
                     match (cwd, &project) {
                         (Some(cwd), _) => Some(absolute(&cwd)?),
@@ -451,7 +508,10 @@ impl Ctl {
                     project_id: project,
                     agent: AgentId::from(agent),
                     model,
-                    mode: SessionMode::Structured,
+                    mode: match mode {
+                        ModeArg::Structured => SessionMode::Structured,
+                        ModeArg::Terminal => SessionMode::Terminal,
+                    },
                     agent_mode,
                     cwd: cwd.map(|cwd| cwd.display().to_string()),
                     title,
@@ -460,7 +520,20 @@ impl Ctl {
                     .call::<SessionCreate>(&params)
                     .await
                     .map_err(|error| error.to_string())?;
-                self.print(&session, || render::session(&session))
+                if mode != ModeArg::Terminal {
+                    return self.print(&session, || render::session(&session));
+                }
+                let terminal = terminal::resolve(&client, &session.id).await?;
+                if attach {
+                    return self.attach(&client, &terminal).await;
+                }
+                self.print(&session, || {
+                    format!(
+                        "{}\n  terminal: {terminal}\n  attach with: burrowctl terminal attach {}",
+                        render::session(&session),
+                        session.id
+                    )
+                })
             }
             SessionCommand::List { all } => {
                 let sessions = client
@@ -615,6 +688,56 @@ impl Ctl {
         }
     }
 
+    async fn terminal(&self, command: TerminalCommand) -> Result<(), String> {
+        let client = self.connect().await?;
+        match command {
+            TerminalCommand::Attach { id } => {
+                let terminal = terminal::resolve(&client, &id).await?;
+                self.attach(&client, &terminal).await
+            }
+            TerminalCommand::Send { id, text, enter } => {
+                let terminal = terminal::resolve(&client, &id).await?;
+                let data = if enter { text + "\r" } else { text };
+                call_empty::<TerminalInput>(
+                    &client,
+                    TerminalInputParams {
+                        terminal_id: terminal,
+                        data,
+                    },
+                )
+                .await
+            }
+            TerminalCommand::Show { id } => {
+                let terminal = terminal::resolve(&client, &id).await?;
+                let snapshot = terminal::show(&client, &terminal).await?;
+                self.print(&snapshot, || {
+                    snapshot
+                        .lines
+                        .iter()
+                        .map(|line| line.text().trim_end().to_owned())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            }
+            TerminalCommand::Scrollback { id, limit } => {
+                let terminal = terminal::resolve(&client, &id).await?;
+                let lines = terminal::scrollback(&client, &terminal, limit).await?;
+                self.print_list(
+                    &lines,
+                    |line| line.text().trim_end().to_owned(),
+                    "no scrollback",
+                )
+            }
+        }
+    }
+
+    /// `terminal attach`, and `session new --attach`.
+    async fn attach(&self, client: &Client, terminal: &str) -> Result<(), String> {
+        let how = terminal::attach(client, terminal).await?;
+        eprintln!("{}", ended(terminal, how));
+        Ok(())
+    }
+
     async fn inbox(&self, command: InboxCommand) -> Result<(), String> {
         let client = self.connect().await?;
         match command {
@@ -725,6 +848,17 @@ impl Ctl {
 }
 
 /// Calls a method that returns `{}`; prints nothing on success.
+/// What `terminal attach` prints when it ends.
+fn ended(terminal: &str, ended: terminal::Ended) -> String {
+    match ended {
+        terminal::Ended::Detached => format!("detached from {terminal}"),
+        terminal::Ended::Closed(Some(code)) => {
+            format!("{terminal}: the program exited with code {code}")
+        }
+        terminal::Ended::Closed(None) => format!("{terminal}: the program was stopped"),
+    }
+}
+
 async fn call_empty<M>(client: &Client, params: M::Params) -> Result<(), String>
 where
     M: burrow_protocol::Method<Result = Empty>,

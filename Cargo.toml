@@ -69,6 +69,9 @@ agent-client-protocol = "5.0.0"
 tokio-util = "0.7.20"
 # Muse Code's MSP client.
 burrow-msp = { path = "crates/burrow-msp" }
+# Terminal emulation in burrowd, one emulator per terminal session (M4). Without its serde
+# feature: nothing of it is serialized.
+alacritty_terminal = { version = "0.26.0", default-features = false }
 
 # Optimise dependencies (GPUI, its renderer, etc.) even in dev builds so the UI
 # stays smooth while iterating; our own crates still compile fast and debuggable.

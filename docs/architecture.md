@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status:** draft. Last updated 2026-11-09.
+> **Status:** draft. Last updated 2026-11-10.
 > `D-NNN` references point to entries in [decisions.md](decisions.md).
 
 ## What Burrow is
@@ -70,6 +70,10 @@ Flags:
 
           sessions ──▶ burrow-agents adapter ──▶ agent process tree, in a Job Object (D-018)
                    ◀── AgentEvents (pump task, one per session)
+
+          terminal sessions ──▶ terminals ──▶ TUI on a pseudo console, in a Job Object (D-038)
+                                 │ reader thread ──▶ emulator (alacritty_terminal) ◀── writer thread
+                                 └ one update task per attached client: paced, latest state (D-039)
 ```
 
 - **Listener** (`server.rs`): creates every pipe instance with an access list that admits only the current user, and rejects remote clients. It always keeps one instance listening, and makes sure only one `burrowd` serves a pipe.
@@ -79,6 +83,7 @@ Flags:
 - **Forwarders**: one task per subscription. It replays the history from the store, then forwards live events, sending each seq exactly once. A client that falls too far behind is disconnected and resumes (D-015).
 - **Projects** (`projects.rs`) and **agents** (`agents.rs`): projects with their git remote; the adapter registry, cached detection results, the models each agent's latest session offered (reported by `agent/list` where detection can't tell, D-032), and the usage providers report.
 - **Sessions and the inbox** (`sessions.rs`): each session has a snapshot for readers and a core behind an async mutex, through which every change goes: requests, and the agent's events, read by one pump task per session. Each change is one commit: the session's events, the `index` summaries, the rows. Agent text is buffered and committed every 100 ms or so. Permission requests become inbox items; the session is `waiting` until they are answered, or until the agent withdraws them (D-031). `lastActivityAt` moves when a turn starts or ends, and every move is on the `index` with the session's state, so a sidebar sorted by activity follows the index alone. Details are in the module's docs.
+- **Terminals** (`terminals/`, D-038 to D-040): a terminal session's TUI runs on a pseudo console from `burrow_agents::launcher::spawn_pty`, created inside its Job Object. Per terminal, a reader thread feeds the console's output to the emulator (`screen.rs`: `alacritty_terminal`'s `Term`, 10,000 lines of scrollback, rendered into protocol lines, with its own count of the lines that scrolled off), a writer thread writes input and the emulator's replies in order, a supervisor task closes the terminal when the program exits, and a timer ends synchronized updates that never end. Each attached client has an update task (`client.rs`) that sends what changed at most every 16 ms, moving the client's rows by the lines that scrolled and correcting its scrollback copy, and prepares the next update only once the previous one is written; it also answers that client's scrollback pages, in order with its updates. The connection handles attach, detach, input and resize in order, and keeps each client's last size for the "latest wins" rule. The session manager owns the terminal's lifecycle: `terminalOpened`, `idle`, then `terminalClosed` and `stopped` or `failed`.
 - **Keep-awake** (`keep_awake.rs`): one thread holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` while any session is `working`. The call has to come from a thread that lives as long as the request, which tokio's tasks don't guarantee.
 - **Records** (`wire.rs`): a stored payload is the complete wire event, `type` included, and is spliced into `events/event` without being parsed.
 - **Logging** (`logging.rs`): `tracing`, written to daily files in `<data dir>\logs`, and to stderr when run in a console. `BURROW_LOG` sets the filter, for example `debug`; the default is `info`. Agents' stderr is logged at `debug` under the target `burrow_agents::stderr`.
@@ -88,7 +93,7 @@ Flags:
 ### Clients
 
 - **Desktop app**: `burrow.exe`, built with GPUI and gpui-component (D-028). This is the main UI. It starts `burrowd` when nothing serves the pipe and resumes its streams after reconnecting (D-029); its lists come from the `index` alone (D-035); `crates/burrow-app/src/views/mod.rs` describes its layout. `burrow.exe --measure <file>` and `cargo xtask measure` measure its startup and memory (D-036).
-- **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list|install`, `usage`, `session new|list|prompt|watch|cancel|model|mode|rename|stop|archive`, `inbox list|respond`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`.
+- **`burrowctl`**: a command-line client for scripting and testing: `status`, `project add|list`, `agent list|install`, `usage`, `session new|list|prompt|watch|cancel|model|mode|rename|stop|archive`, `inbox list|respond`, `terminal attach|show|send|scrollback`, `events tail <stream>` and `debug append <stream> <event-json>`. It prints readable text, or JSON lines with `--json`. `terminal attach` draws a terminal in the console with ANSI sequences, mirrors its input modes onto the console, and forwards keystrokes; Ctrl+] then `d` detaches.
 - **Phone app**: for remote control. The technology isn't decided yet ([plan.md](plan.md#open-decisions)).
 
 Every client speaks the [client protocol](protocol.md#part-1-client-protocol). Clients hold no state that matters: a client can crash or disconnect without affecting sessions or runs.
@@ -105,7 +110,7 @@ Each adapter does two jobs:
 | Codex | ACP through `@agentclientprotocol/codex-acp` 2.6.0 (npm) | The adapter runs `codex app-server` itself. A direct app-server adapter is the fallback if Burrow needs Codex's structured rate limits. |
 | Cursor | ACP, built in: `agent acp` | Log in with `agent login` or set `CURSOR_API_KEY`. |
 | Muse Code | MSP, Meta's own protocol, through `muse serve`. Client: `burrow-msp`; adapter: `burrow_agents::msp` | Works end to end with Muse 1.4.14; see [Muse over MSP](#muse-over-msp). `--provider echo` is free and suits tests, but can't call tools. The shell tool needs `muse sandbox windows setup`, run elevated. |
-| Any other CLI | Terminal (ConPTY) | The universal fallback. Burrow sees only the screen, not structure. |
+| Any of them, as a terminal session | Its own TUI, on ConPTY (M4) | Burrow sees only the screen, not structure. See [terminal sessions](#terminal-sessions). Any other CLI could run the same way later. |
 
 The ACP side is the `burrow-acp` crate, built on the `agent-client-protocol` SDK (5.0.0). The two npm adapters need Node.js 22 or later.
 
@@ -200,6 +205,23 @@ None of them needs `authenticate` when its CLI is logged in. Burrow offers them 
 - **For tests:** `BURROW_MUSE_PROVIDER=echo` runs sessions on the free echo provider, memory-only. `BURROW_MUSE_DISABLE_SANDBOX=1` turns the sandbox off, so that Muse asks before shell commands.
 - **Tested** against `burrow-msp`'s recorded transcripts (an approval round trip, an approval Muse settles itself, an interrupt), through `burrowd` with echo (`crates/burrowd/tests/muse.rs`, approval modes included), and live with `meta` once: a prompt that streamed back, a shell command approved from the inbox, a clean stop.
 
+#### Terminal sessions
+
+A terminal session (`session/create` with `mode: "terminal"`) runs an agent's own interactive TUI instead of a protocol adapter. `AgentAdapter::terminal` says what to run; `burrowd` starts it on a pseudo console and emulates the screen ([protocol.md](protocol.md#terminals)).
+
+| Agent | Runs (`burrow_agents::terminal`) |
+|---|---|
+| Claude Code | the native `claude.exe` that npm's `claude.cmd` runs (`node_modules\@anthropic-ai\claude-code\bin\claude.exe`) |
+| Codex | `node node_modules\@openai\codex\bin\codex.js`, as `codex.cmd` runs it; it starts the native `codex.exe` |
+| Cursor | `versions\<newest>\node.exe versions\<newest>\index.js`, as for ACP but without `acp` (D-020) |
+| Muse | `muse-bin-<version>.exe` (D-023) |
+| `fake` (`--dev`) | `burrow-fake-agent --tui`: a small TUI for tests, see `burrow_agents::fake::tui` |
+
+- **No shims in between.** A `cmd.exe` running a batch file asks "Terminate batch job (Y/N)?" after a Ctrl+C, inside the TUI's screen, and PowerShell adds a process and a second or so. When a shim's layout isn't the expected one, the shim runs anyway, through `cmd.exe`.
+- **The environment** is `burrowd`'s, without what describes the terminal `burrowd` was started from (`WT_SESSION`, `TERM_PROGRAM`, …), without `NO_COLOR` (which a parent such as Claude Code sets, and which turns colours off) and Claude Code's session markers (`CLAUDECODE`, with which `claude` refuses to start "nested"), and with `TERM=xterm-256color` and `COLORTERM=truecolor`. The folder is passed without Windows' `\\?\` prefix, which TUIs show and `cmd.exe` can't use.
+- **Seen on 2026-11-10:** Claude Code, Cursor and Muse first ask whether to trust a new folder; Codex went straight to its main screen in a folder outside git. Each answer is saved by the agent, so the checks left them unanswered.
+- **ConPTY's host,** `conhost.exe`, is `burrowd`'s child, not the TUI's, so it isn't in the Job Object; it exits when the console is closed, and when `burrowd` dies (its pipes break). The tests check that nothing is left under `burrowd` after a stop.
+
 ### Flow engine
 
 The flow engine runs flows: durable graphs of steps. See [flows.md](flows.md).
@@ -248,7 +270,7 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 - **Startup:** `burrowd` starts at login for the current user and shows a tray icon. The desktop app starts it if it isn't running.
 - **Local connection:** clients connect over the named pipe `\\.\pipe\burrow-<user SID>`. Its access list allows only the current user, and remote pipe clients are rejected. Only one `burrowd` can serve the pipe; a second one exits with code 3. Before sending anything, a client checks that the pipe's server process runs as the current user (`GetNamedPipeServerProcessId`, then its token's SID), so another account can't squat the pipe's name.
-- **Process cleanup:** every agent process and custom step runs inside a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, created suspended so nothing escapes. Stopping a session or step kills its whole process tree, with no orphaned `node`, shell or MCP server processes, and so does `burrowd` dying, because Windows closes its job handles. An automated test checks it (`stopping_a_session_leaves_no_stray_processes`).
+- **Process cleanup:** every agent process and custom step runs inside a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, created suspended so nothing escapes; a terminal session's TUI is created inside its job directly, with `PROC_THREAD_ATTRIBUTE_JOB_LIST` (D-038). Stopping a session or step kills its whole process tree, with no orphaned `node`, shell or MCP server processes, and so does `burrowd` dying, because Windows closes its job handles. An automated test checks it (`stopping_a_session_leaves_no_stray_processes`).
 - **No console windows:** agent processes start with `CREATE_NO_WINDOW`. Each still gets a hidden `conhost.exe`, inside its job.
 - **Sleep:** while any session is `working`, `burrowd` asks Windows not to sleep (`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`, held by a dedicated thread). A session `waiting` on a human doesn't count, so a forgotten question doesn't keep the PC awake for days. Runs will count too, from M5.
 - **WSL:** a session can run inside a WSL distro (`wsl.exe -d <distro> --`), with path translation between Windows and Linux.
@@ -272,14 +294,14 @@ The artifact store holds files that steps produce or use: plans, diffs, transcri
 
 | Crate | Kind | Purpose | Status |
 |---|---|---|---|
-| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; M3's `session/rename`, `lastActivityAt`, the agent and actions on index events, and `AgentInfo.agentModes`; schema export |
-| `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel`. M3: titles and renaming, activity on the index and lists sorted by it, withdrawn permission requests, models and agent modes learned from sessions, complete index events (D-035) |
+| `burrow-protocol` | lib | Wire types for both protocols; JSON Schema export | M1 types plus M2's projects, agents, usage, sessions, session events, inbox; M3's `session/rename`, `lastActivityAt`, the agent and actions on index events, and `AgentInfo.agentModes`; M4's terminal methods and notifications, the line format, and `terminalClosed`; schema export |
+| `burrowd` | bins `burrowd`, `burrow-fake-agent`, `burrow-fake-acp-agent` | The service, and the scripted fake agents it offers with `--dev` | M1: named pipe server, handshake, subscriptions with replay, `debug/append`, logging. M2: projects, agent detection, the session manager and inbox, restart recovery, keep-awake, requests on their own tasks with `$/cancel`. M3: titles and renaming, activity on the index and lists sorted by it, withdrawn permission requests, models and agent modes learned from sessions, complete index events (D-035). M4: terminal sessions and the terminal host, with `alacritty_terminal` (D-038 to D-040) |
 | `burrow-app` | bin `burrow` | GPUI desktop client, on gpui-component (D-028) | M3 shell: connects and starts `burrowd` (D-029); sidebar, inbox panel, new session page, session view; state and views split as in D-030. The transcript: a virtualized list of rows from `state::transcript` with streamed markdown, tool call cards and diffs (D-033, D-034). Session controls: the header's model and agent mode pickers, state, usage, limit countdown, stop, archive, rename and folder; the prompt box with history; the new session page with model, mode and adapter installs; the sidebar's context menu and archived sessions. `--measure` (D-036) |
 | `burrow-client` | lib | Connection and typed calls, shared by the app and `burrowctl` | Connect (checking the pipe's server is the current user), handshake, typed and cancellable calls, notifications, resumable subscriptions; runs on any executor (D-016) |
-| `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session`, `inbox`, `events tail`, `debug append` |
+| `burrowctl` | bin | Command-line client | `status`, `project`, `agent`, `usage`, `session` (with `--mode terminal`), `inbox`, `terminal attach`, `show`, `send` and `scrollback`, `events tail`, `debug append` |
 | `burrow-store` | lib | SQLite event store: append-only streams with gap-free seqs, entity rows committed with events (D-017), migrations | implemented |
 | `burrow-transport` | lib | What `burrowd` and its local clients share: the pipe's name, newline-delimited JSON framing (D-013), and the check that a pipe's server runs as the current user | implemented |
-| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection, fake agent, the ACP adapter (with its installer, watchdog and fake ACP agent; D-024, D-025) and the MSP adapter for Muse (D-026, D-027) done; withdrawn permission requests and Muse's modes (D-031), models by name (D-032) |
+| `burrow-agents` | lib | Agent adapters: the adapter interface, the Job Object launcher, detection, the fake agent; ACP and MSP adapters (D-018) | interface, launcher, detection, fake agent, the ACP adapter (with its installer, watchdog and fake ACP agent; D-024, D-025) and the MSP adapter for Muse (D-026, D-027) done; withdrawn permission requests and Muse's modes (D-031), models by name (D-032). M4: the ConPTY launcher (`spawn_pty`, D-038), each agent's TUI command (`terminal`), and the fake TUI |
 | `burrow-acp` | lib | ACP client for one agent process over its stdio, built on `agent-client-protocol` 5.0.0. Has its own typed API and no Burrow dependencies; the ACP adapter in `burrow-agents` maps it. Also: launch commands (D-020) and usage-limit detection | M2: implemented; tested against an in-process fake agent, and live against Claude Code, Codex and Cursor |
 | `burrow-msp` | lib | Client for Muse Code's MSP (`muse serve`), independent of the other crates: handshake, sessions, turns, typed item events, approvals, interrupt and cancel, usage, models, shutdown; finds and spawns Muse's binary | done; wrapped by `burrow_agents::msp` |
 | `burrow-flow` | lib | Flow engine, YAML loader, step runner | planned |

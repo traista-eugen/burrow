@@ -149,10 +149,14 @@ Everything above is built and was checked by eye on the merged release build (20
 
 ## M4: Terminal sessions
 
-- [ ] **ConPTY** through `portable-pty`. Terminal emulation in `burrowd` with `alacritty_terminal`.
-- [ ] **Terminal methods:** `terminal/attach` (snapshot), `terminal/update` (changed lines only), `terminal/input` and `terminal/resize`.
+- [x] **ConPTY**, called directly through `windows-sys` rather than `portable-pty`: `CreatePseudoConsole`, and `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the program is created inside its kill-on-close Job Object (D-038). **Terminal emulation in `burrowd`** with `alacritty_terminal` 0.26: one emulator per terminal, 10,000 lines of scrollback, fed by a reader thread that never waits for clients (D-039).
+- [x] **Terminal sessions:** `session/create` with `mode: "terminal"` runs Claude Code's, Codex's, Cursor's and Muse's own TUIs, each the program its shim would run, with no `cmd.exe` or PowerShell in between; `burrowd --dev` adds a fake TUI (`burrow-fake-agent --tui`). `terminalOpened`, then `idle` while it runs, then `terminalClosed` with the exit code and `stopped` (code 0, or `session/stop`) or `failed`. Restarts mark them `stopped`.
+- [x] **Terminal methods:** `terminal/attach` (snapshot), `terminal/update` (only what changed, at most every 16 ms per client, with `scrolled` counts and scrollback corrections, the next one only once the previous one is written), `terminal/input`, `terminal/resize`, `terminal/scrollback` (pages at negative indexes, in order with the client's updates), `terminal/detach`, `terminal/closed`; input modes, title and bell (D-039).
 - [ ] **A GPUI terminal view**, drawn from cell runs.
-- [ ] **Decide terminal resize behaviour** when several clients are attached (open question in `protocol.md`).
+- [x] **Decide terminal resize behaviour** when several clients are attached: the latest wins, the client that last resized or typed sets the size (Q7, D-040).
+- [x] **`burrowctl terminal attach | show | send | scrollback`**, and `session new --mode terminal [--attach]`: a second client in any console, with Ctrl+] then `d` to detach.
+- [x] **Tests** (`crates/burrowd/tests/terminals.rs`, the fake TUI on a real pseudo console, no quota): typing and colours; detaching and a second client seeing exactly the current screen; two clients at once; the resize rule; scrollback paging matching what scrolled; narrowing a terminal without duplicated lines; exits with their codes; stopping leaving no processes, `conhost.exe` included; a hard-killed `burrowd`; input modes; a client that stops reading never stalling the terminal or getting a backlog. The emulator's unit tests cover updates, scrolling, resets and paging.
+- [x] **By hand** (2026-11-10, through `burrowctl terminal attach` in a console, against a separate `burrowd`): the first screens of Claude Code 2.1.319 and Cursor 2026.11.05 (their folder-trust questions), Codex 0.167.0 (its main screen) and Muse 1.4.15 (its workspace-trust question), unanswered, with no prompts sent; `session stop` left no process behind for any of them.
 
 **Done when** any agent's TUI runs inside Burrow, and a second client can detach and attach without losing anything.
 
@@ -242,4 +246,3 @@ Everything above is built and was checked by eye on the merged release build (20
 | Q4 | Can a PR auto-merge once the reviewer and CI pass? | M6 | `deliver-issue` reads `project.settings.autoMerge` |
 | Q5 | Creative focus: few-minute videos are confirmed. Also books, comics, short vertical videos? | M9 | |
 | Q6 | Cloud generation budget, or local-first? | M9 | |
-| Q7 | Terminal resize with several clients attached | M4 | |
