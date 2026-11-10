@@ -155,6 +155,13 @@ cargo run -p burrow-acp --example probe -- cursor   # or claude, codex
 
 Claude Code and Codex need their npm adapters installed first (`burrowctl agent install claude`); see [architecture.md](docs/architecture.md#acp-agents-as-verified).
 
+Try the terminal view (M4) on a local shell, before it is connected to `burrowd`. The demo runs `pwsh`, or any program you name, in ConPTY and draws it through the app's terminal view. In the terminal, Ctrl+Shift+C and Ctrl+Shift+V copy and paste; Ctrl+C goes to the program (D-041).
+
+```powershell
+cargo run -p burrow-app --example terminal_demo              # or name a program: -- edit README.md
+cargo run --release -p burrow-app --example terminal_demo -- --bench   # time drawing a 200×60 screen
+```
+
 ## Documentation
 
 | Document | What's in it |

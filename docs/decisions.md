@@ -44,6 +44,8 @@ Every decision that shapes the architecture gets an entry here.
 | [D-035](#d-035-index-events-carry-what-a-list-entry-needs-and-agentinfo-lists-agent-modes) | Index events carry what a list entry needs, and `AgentInfo` lists agent modes | 2026-11-09 | accepted; amends D-029's consequence |
 | [D-036](#d-036-the-app-measures-itself-keeps-recent-sessions-open-and-redraws-only-for-what-changed-on-screen) | The app measures itself, keeps recent sessions open, and redraws only for what changed on screen | 2026-11-09 | accepted |
 | [D-037](#d-037-the-app-starts-burrowd-under-the-desktop-shell-out-of-its-own-process-tree) | The app starts `burrowd` under the desktop shell, out of its own process tree | 2026-11-09 | accepted; amends D-029's launch |
+| [D-041](#d-041-the-terminal-view-sends-xterms-encodings-keeps-ctrlshiftc-and-v-for-the-clipboard-and-gives-a-focused-terminal-the-apps-keys) | The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys | 2026-11-10 | accepted |
+| [D-042](#d-042-the-terminal-view-paints-a-glyph-per-cell-from-line-layouts-cached-by-version-in-one-paint-layer-per-row) | The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row | 2026-11-10 | accepted |
 
 ---
 
@@ -876,3 +878,96 @@ This amends D-029's launch, which tried only the last two.
 - `burrowd`'s parent is Explorer, so Task Manager shows it under Explorer, not under Burrow.
 - `burrowd` gets the app's environment, as before. A `burrowd` started from a terminal sees that terminal's variables, such as `BURROW_MUSE_DISABLE_SANDBOX`.
 - `crates/burrow-app/src/backend/daemon.rs` tests that a process started this way is the shell's child and shares the shell's job membership. It was checked by hand by launching the app from a terminal tab, closing the tab, and finding `burrowd` still serving its pipe.
+
+## D-041 The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys
+
+**Decision.**
+- **Keys** are sent as xterm sends them (`views/terminal/input.rs`):
+  - text, with or without Shift, comes through the window's input handler, so IME composition, AltGr and dead keys work;
+  - Enter is `\r`, Backspace `\x7f` (Ctrl+Backspace `\x08`), Tab `\t`, Shift+Tab `\x1b[Z`, Esc `\x1b`;
+  - arrows, Home and End are `\x1b[A` or, in application cursor mode (DECCKM), `\x1bOA`; Insert, Delete, PageUp and PageDown are `\x1b[2~` to `\x1b[6~`; F1–F4 are `\x1bOP` to `\x1bOS`, F5–F12 `\x1b[15~` to `\x1b[24~`;
+  - with modifiers these take xterm's parameter, 1 + Shift + 2·Alt + 4·Ctrl: Ctrl+Right is `\x1b[1;5C`, Ctrl+Delete `\x1b[3;5~`;
+  - Ctrl+letter sends ^A–^Z, and Ctrl+[ \ ] ^ _ / and Space send ESC, FS, GS, RS, US, US and NUL. Ctrl+- alone sends nothing;
+  - Alt+key sends ESC, then the key.
+  - No kitty keyboard protocol and no modifyOtherKeys yet.
+- **The clipboard** is Ctrl+Shift+C and Ctrl+Insert to copy, Ctrl+Shift+V and Shift+Insert to paste.
+  - Ctrl+C and Ctrl+V always go to the program.
+  - Copying with nothing selected does nothing. Copied lines lose trailing spaces and are joined by CRLF on Windows.
+  - A paste's newlines become `\r`, as typed Enter. With bracketed paste on (2004) it is wrapped in `\x1b[200~` and `\x1b[201~`, and any end marker inside it is dropped.
+- **The app's keys:** while the terminal has focus, Ctrl+N, Ctrl+L, Ctrl+I, Ctrl+O and Esc go to the program. The terminal's key context binds them to `NoAction`, which outranks the app's bindings. Ctrl+Shift+[ and ] still switch sessions, and the Windows key stays the system's.
+- **The mouse:**
+  - With mouse reporting on (1000, 1002, 1003), presses, releases, drags, moves and the wheel are reported in SGR encoding (1006), or else X10. Shift held selects instead.
+  - Otherwise the mouse selects, and the wheel scrolls back. On the alternate screen with alternate scroll (1007), the wheel sends arrow keys instead.
+- **Focus** is reported as `\x1b[I` and `\x1b[O` when the program asks (1004).
+- **Back to the bottom:** typing, pasting, and output that scrolls lines into scrollback return the view to the bottom. Lines rewritten in place don't, so the user can stay scrolled back.
+
+**Why.**
+- **xterm's encodings** are what TUIs expect, what ConPTY's input parser understands, and what Windows Terminal sends.
+- **Ctrl+C and Ctrl+V belong to the program.** Ctrl+C interrupts every agent and shell; Ctrl+V is readline's literal-next, and some agent TUIs read it to paste images.
+  - Windows Terminal's defaults (Ctrl+C copies when there is a selection, Ctrl+V pastes) would turn an interrupt into a copy whenever a stale selection is on screen.
+  - Ctrl+Shift+C and V is the Linux terminals' convention; Ctrl+Insert and Shift+Insert the Windows console's.
+- **The app's keys are the program's too:** Ctrl+L clears the screen, Ctrl+N and Ctrl+O are readline's history keys, Ctrl+I is Tab, and Esc interrupts Claude Code and Codex. The session switch keys are rarely needed by programs.
+- **Staying scrolled back:** agent TUIs rewrite their status line many times a second while they work. Returning to the bottom on every update would make scrollback unreadable exactly when the user wants to read it.
+
+**Alternatives considered.**
+- **Windows Terminal's Ctrl+C and Ctrl+V:** see above.
+- **The kitty keyboard protocol:** it tells Shift+Enter from Enter, and every key's modifiers, but few programs on Windows ask for it yet, and it can come later as a mode.
+- **Returning to the bottom on any update:** see above.
+
+**Consequences.**
+- Shift+Enter sends `\r`, like Enter. A TUI's "new line in the prompt" needs its own key (Alt+Enter, Ctrl+J) until the kitty protocol arrives.
+- X10 mouse reports put each coordinate in one byte, and `terminal/input` is UTF-8 text, so they stop at column and row 95. Programs asking for SGR, as almost all do, have no limit.
+- An app-wide key added later that programs need must be added to the terminal's `NoAction` bindings (`views/terminal/mod.rs`, `bind_keys`).
+
+## D-042 The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row
+
+**Decision.**
+- **The model** (`views/terminal/grid.rs`) holds the screen as lines of runs in the line format the host sends. Lines are addressed by index: `0` is the top row, negative indices are scrollback.
+  - An update replaces whole lines. Its `scrolled` count moves the top lines into scrollback, keeping their content.
+  - Every stored line has a version, new when it is replaced and kept when it moves.
+  - Older scrollback is asked for in pages (`TerminalEvent::RequestHistory`) as the view nears the oldest line loaded. The model keeps at most 10,000 lines of it.
+- **The font** is Cascadia Mono, or Consolas where it isn't installed, at 14 px.
+  - A cell is the advance of `m` wide and the font's ascent plus descent high, rounded up to whole device pixels.
+  - Character widths come from `unicode-width`, per character, as `alacritty_terminal` measures them.
+- **Drawing** (`views/terminal/render.rs`):
+  - Each character's glyph is found once per font style, by shaping that character alone. That also finds a fallback font for characters the font lacks.
+  - Glyphs are painted at their cells with `paint_glyph`, so text is never shaped a line at a time. Only cells of several characters, such as a letter with combining marks, are shaped.
+  - Backgrounds are merged into spans. Underlines, undercurls (wavy) and strikethroughs are drawn per span.
+  - A line is laid out once per version, and kept while it is on screen.
+  - A frame paints backgrounds and the selection in one paint layer, the text in one layer per row, then the cursor over both.
+- **Colours:**
+  - the 16 ANSI colours are themed to the app's dark palette, with cream text on the app's background and a gold cursor;
+  - the rest of xterm's 256 colours, and truecolour, are drawn as given;
+  - inverse swaps the colours, dim fades the text 40% towards its background, hidden draws no text;
+  - bold uses the bold font, not brighter colours.
+- **The cursor** is a block, underline or bar, as the program sets it.
+  - A block shows the character under it in the background colour.
+  - Without focus, the block is drawn hollow.
+  - It blinks every 530 ms only while focused, and stops, shown, after 15 s with no input or output, so an idle or unfocused terminal doesn't redraw.
+
+**Why.** Measured on 2026-11-10 with `terminal_demo --bench` (release build, Ryzen 9 9950X, Radeon AI PRO R9700, 125% scale, a 165 Hz display), on a 200×60 screen of styled text with 20 runs per line:
+
+| Approach | Every line new | One line new | Nothing new | Frames a second |
+|---|---|---|---|---|
+| Lines shaped whole, glyphs forced to the cell width (GPUI's `shape_line` with `force_width`) | 8.3 ms | 1.1 ms | 0.9 ms | 113–165 |
+| A glyph per cell, no paint layers | 7.7 ms | 7.1 ms | 8.2 ms | 30–120 |
+| A glyph per cell, all text in one layer | 1.25 ms | 0.9 ms | 0.9 ms | 30–43 |
+| **A glyph per cell, one layer per row** | **1.15 ms** (p95 1.5) | **0.76 ms** | **0.76 ms** | **165** |
+
+- **Shaping** a line costs most of the first approach. A terminal's text is monospace on a fixed grid, so after a character's first appearance it needs no shaping.
+- **Paint layers:** outside a paint layer, GPUI places every primitive in the scene by searching the primitives already there, which costs about 0.6 µs per glyph. Inside a layer they share one draw order.
+  - With all the text in one layer, the window's frame rate fell, though the terminal's own time was low.
+  - One layer per row, as GPUI's own text painting uses, kept the full frame rate.
+- **Caching by version** means a frame where one line changed lays out one line. GPUI rebuilds the window's scene every frame, so painting is not incremental.
+  - The session view should embed the terminal as a cached view (`AnyView::cached`), so frames that redraw other parts of the window reuse its last scene.
+
+**Alternatives considered.**
+- **Shaping a line at a time,** as GPUI's text does: 7 ms slower for a full new screen, from shaping alone.
+- **An entity per row,** so GPUI could reuse unchanged rows' scenes: thousands of entities for a few hundred microseconds.
+- **Our own glyph atlas and shader:** GPUI's sprites already batch the glyphs, and painting a full screen takes under a millisecond.
+
+**Consequences.**
+- Ligatures aren't drawn. Cascadia Mono has none; Cascadia Code's would show as separate characters.
+- A fallback glyph wider than its cells, such as some emoji, overlaps the next cell, as in other terminals.
+- The host has to report how many lines scrolled into scrollback with each update, or scrolled-off lines are lost to the view until it asks for history again.
+- The line format has no soft-wrap flag, so copying a long line that wrapped puts a line break where it wrapped.
