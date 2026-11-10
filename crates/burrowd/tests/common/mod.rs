@@ -177,6 +177,7 @@ pub fn event(n: u64) -> Event {
         project_id: None,
         state: None,
         agent: None,
+        mode: None,
     })
 }
 

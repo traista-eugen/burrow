@@ -184,10 +184,13 @@ pub fn samples() -> Vec<Sample> {
                    "createdAt": AT, "updatedAt": AT}),
             json!({"id": "ses_3", "agent": "codex", "mode": "structured", "cwd": "C:\\", "state": "failed",
                    "reason": "codex-acp exited with code 1", "createdAt": AT, "updatedAt": AT}),
+            json!({"id": "ses_4", "agent": "claude", "mode": "terminal", "terminalId": "trm_1", "cwd": "C:\\",
+                   "state": "idle", "createdAt": AT, "updatedAt": AT, "lastActivityAt": AT}),
         ],
         "SessionCreateParams": SessionCreateParams => [
             json!({"projectId": "prj_1", "agent": "claude", "model": "opus", "mode": "structured", "title": "Fix it"}),
             json!({"agent": "fake", "mode": "terminal", "cwd": "D:\\tmp"}),
+            json!({"agent": "claude", "mode": "terminal", "cwd": "D:\\tmp", "cols": 160, "rows": 48}),
             json!({"agent": "codex", "mode": "structured", "agentMode": "read-only", "cwd": "D:\\tmp"}),
         ],
         "SessionIdParams": SessionIdParams => [json!({"sessionId": "ses_1"})],
@@ -208,9 +211,10 @@ pub fn samples() -> Vec<Sample> {
             json!("stopped"), json!("failed"), json!("hibernating"),
         ],
         "SessionSummary": SessionSummary => [
-            json!({"id": "ses_1", "projectId": "prj_1", "agent": "claude", "model": "opus", "title": "Fix it",
-                   "state": "idle", "createdAt": AT, "updatedAt": AT, "lastActivityAt": AT}),
-            json!({"id": "ses_2", "agent": "fake", "state": "stopped", "archived": true, "createdAt": AT, "updatedAt": AT}),
+            json!({"id": "ses_1", "projectId": "prj_1", "agent": "claude", "model": "opus", "mode": "structured",
+                   "title": "Fix it", "state": "idle", "createdAt": AT, "updatedAt": AT, "lastActivityAt": AT}),
+            json!({"id": "ses_2", "agent": "fake", "mode": "terminal", "state": "stopped", "archived": true,
+                   "createdAt": AT, "updatedAt": AT}),
         ],
         "SessionUsage": SessionUsage => [
             json!({"inputTokens": 10, "outputTokens": 2}),
@@ -341,7 +345,9 @@ pub fn samples() -> Vec<Sample> {
         "Empty": Empty => [json!({})],
         "EntityCreated": Event => [
             json!({"type": "entityCreated", "entity": "session", "id": "ses_1", "title": "Fix the login bug",
-                   "projectId": "prj_1", "state": "starting", "agent": "claude"}),
+                   "projectId": "prj_1", "state": "starting", "agent": "claude", "mode": "structured"}),
+            json!({"type": "entityCreated", "entity": "session", "id": "ses_3", "state": "starting",
+                   "agent": "codex", "mode": "terminal"}),
             json!({"type": "entityCreated", "entity": "session", "id": "ses_2", "state": "starting"}),
             json!({"type": "entityCreated", "entity": "project", "id": "prj_1", "title": "burrow"}),
         ],

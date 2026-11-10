@@ -277,6 +277,9 @@ impl Sessions {
                 if session.mode == SessionMode::Terminal
                     && let Some(terminal_id) = terminal_of(&hub, &stream).await?
                 {
+                    session
+                        .terminal_id
+                        .get_or_insert_with(|| terminal_id.clone());
                     commit.event(
                         &stream,
                         TerminalClosed {
@@ -400,6 +403,7 @@ impl Sessions {
                 ));
             }
         }
+        let size = terminal_size(&params)?;
         let Some(adapter) = self.agents.registry().get(&params.agent) else {
             let offered: Vec<String> = self
                 .agents
@@ -438,6 +442,7 @@ impl Sessions {
             agent: params.agent.clone(),
             model: params.model.clone(),
             mode: params.mode,
+            terminal_id: None,
             cwd: projects::display_path(&cwd),
             title: params
                 .title
@@ -476,6 +481,7 @@ impl Sessions {
                     project_id: session.project_id.clone(),
                     state: Some(SessionState::Starting.to_string()),
                     agent: Some(session.agent.clone()),
+                    mode: Some(session.mode),
                 },
             )
             .put(SESSION, &session.id, &session);
@@ -490,7 +496,7 @@ impl Sessions {
         };
         if params.mode == SessionMode::Terminal {
             return self
-                .start_terminal(slot.clone(), core, adapter.as_ref(), &config, cancel)
+                .start_terminal(slot.clone(), core, adapter.as_ref(), &config, size, cancel)
                 .await;
         }
         let start = tokio::select! {
@@ -556,25 +562,22 @@ impl Sessions {
         Err(error)
     }
 
-    /// Starts a terminal session's TUI on a new terminal, and makes the session `idle`; or
-    /// `failed` when it can't start, `stopped` when the start was cancelled or stopped meanwhile.
+    /// Starts a terminal session's TUI on a new terminal of `size`, and makes the session `idle`;
+    /// or `failed` when it can't start, `stopped` when the start was cancelled or stopped
+    /// meanwhile.
     async fn start_terminal(
         self: &Arc<Self>,
         slot: Arc<Slot>,
         mut core: tokio::sync::MutexGuard<'_, Core>,
         adapter: &dyn AgentAdapter,
         config: &SessionConfig,
+        size: TerminalSize,
         cancel: &Cancel,
     ) -> Result<Session, ErrorObject> {
         let opened = adapter.terminal(config).and_then(|spec| {
-            self.terminals
-                .open(&spec, TerminalSize::DEFAULT)
-                .map_err(|error| {
-                    AgentError::Unavailable(format!(
-                        "can't start {}: {error}",
-                        spec.program.display()
-                    ))
-                })
+            self.terminals.open(&spec, size).map_err(|error| {
+                AgentError::Unavailable(format!("can't start {}: {error}", spec.program.display()))
+            })
         });
         let terminal = match opened {
             Ok(terminal) => terminal,
@@ -608,6 +611,7 @@ impl Sessions {
                 terminal_id: terminal.id().to_owned(),
             },
         );
+        change.next.terminal_id = Some(terminal.id().to_owned());
         change.next.state = SessionState::Idle;
         core.finish(self, change).await?;
         let session = core.session.clone();
@@ -1678,6 +1682,37 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.0.kill();
     }
+}
+
+/// The size a terminal session starts at: `session/create`'s `cols` and `rows`, else 120 × 32.
+/// Both or neither, within `terminal/resize`'s bounds, and only for terminal sessions.
+fn terminal_size(params: &SessionCreateParams) -> Result<TerminalSize, ErrorObject> {
+    let size = match (params.cols, params.rows) {
+        (None, None) => return Ok(TerminalSize::DEFAULT),
+        (Some(cols), Some(rows)) => TerminalSize { cols, rows },
+        _ => {
+            return Err(ErrorObject::invalid_params(
+                "session/create takes cols and rows together",
+            ));
+        }
+    };
+    if params.mode != SessionMode::Terminal {
+        return Err(ErrorObject::invalid_params(
+            "cols and rows are for terminal sessions only",
+        ));
+    }
+    if !size.is_valid() {
+        return Err(ErrorObject::invalid_params(format!(
+            "a terminal is {}–{} columns by {}–{} rows, not {} × {}",
+            TerminalSize::MIN_COLS,
+            TerminalSize::MAX_COLS,
+            TerminalSize::MIN_ROWS,
+            TerminalSize::MAX_ROWS,
+            size.cols,
+            size.rows
+        )));
+    }
+    Ok(size)
 }
 
 /// The terminal a terminal session's stream announced, from its first events.

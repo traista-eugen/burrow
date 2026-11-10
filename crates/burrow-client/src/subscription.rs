@@ -3,7 +3,8 @@ use std::task::{Context, Poll};
 
 use burrow_protocol::methods::EventsUnsubscribe;
 use burrow_protocol::{
-    Notification, StreamEvent, StreamName, SubscribeParams, SubscribeResult, UnsubscribeParams,
+    Notification, Response, StreamEvent, StreamName, SubscribeParams, SubscribeResult,
+    UnsubscribeParams,
 };
 use futures_core::Stream;
 use tokio::sync::mpsc;
@@ -129,21 +130,49 @@ impl Drop for Subscription {
     }
 }
 
-/// Incoming notifications other than `events/event`. See [`Client::notifications`].
+/// What [`Notifications::next_incoming`] yields: a notification, or the answer to a request
+/// sent with [`Client::send_in_order`], in the order `burrowd` sent them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Incoming {
+    /// A notification other than `events/event`, such as `terminal/update`.
+    Notification(Notification),
+    /// The answer to a request sent with [`Client::send_in_order`]: its `id` is the one that call
+    /// returned.
+    Answer(Response),
+}
+
+/// Incoming notifications other than `events/event`, and the answers of requests sent with
+/// [`Client::send_in_order`]. See [`Client::notifications`].
 #[derive(Debug)]
 pub struct Notifications {
-    receiver: mpsc::UnboundedReceiver<Notification>,
+    receiver: mpsc::UnboundedReceiver<Incoming>,
 }
 
 impl Notifications {
-    pub(crate) fn new(receiver: mpsc::UnboundedReceiver<Notification>) -> Self {
+    pub(crate) fn new(receiver: mpsc::UnboundedReceiver<Incoming>) -> Self {
         Self { receiver }
     }
 
     /// The next notification. `None` once the connection has closed, or another
-    /// [`Client::notifications`] stream replaced this one.
+    /// [`Client::notifications`] stream replaced this one. Answers to requests sent with
+    /// [`Client::send_in_order`] are skipped: read them with [`Notifications::next_incoming`].
     pub async fn next(&mut self) -> Option<Notification> {
+        loop {
+            if let Incoming::Notification(notification) = self.receiver.recv().await? {
+                return Some(notification);
+            }
+        }
+    }
+
+    /// The next notification or in-order answer, in the order `burrowd` sent them. `None` once
+    /// the connection has closed, or another [`Client::notifications`] stream replaced this one.
+    pub async fn next_incoming(&mut self) -> Option<Incoming> {
         self.receiver.recv().await
+    }
+
+    /// The next notification or in-order answer if one is waiting, without waiting.
+    pub fn try_next_incoming(&mut self) -> Option<Incoming> {
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -151,6 +180,15 @@ impl Stream for Notifications {
     type Item = Notification;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Notification>> {
-        self.receiver.poll_recv(cx)
+        loop {
+            match self.receiver.poll_recv(cx) {
+                Poll::Ready(Some(Incoming::Notification(notification))) => {
+                    return Poll::Ready(Some(notification));
+                }
+                Poll::Ready(Some(Incoming::Answer(_))) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }

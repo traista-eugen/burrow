@@ -106,6 +106,11 @@ pub struct Session {
     pub model: Option<String>,
     /// Structured or terminal.
     pub mode: SessionMode,
+    /// A terminal session's terminal (`trm_…`), for `terminal/attach`, once its program has
+    /// started. It stays after the program exits: a closed terminal can still be attached, until
+    /// the session is archived or `burrowd` restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
     /// The folder the agent works in.
     pub cwd: String,
     /// The display name. Set from the first prompt when `session/create` didn't give one;
@@ -212,6 +217,9 @@ pub struct SessionSummary {
     /// The model, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Structured or terminal. Absent from an older `burrowd`: structured.
+    #[serde(default)]
+    pub mode: SessionMode,
     /// The display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -237,6 +245,7 @@ impl From<&Session> for SessionSummary {
             project_id: session.project_id.clone(),
             agent: session.agent.clone(),
             model: session.model.clone(),
+            mode: session.mode,
             title: session.title.clone(),
             state: session.state.clone(),
             archived: session.archived,
@@ -296,6 +305,31 @@ pub struct SessionCreateParams {
     /// The display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A terminal session's starting width in columns, 2 to 1000, so its program draws its
+    /// first screen at the size the client shows. Given with `rows`, or neither; only with
+    /// `mode: "terminal"`. Without them the terminal starts at 120 × 32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    /// A terminal session's starting height in rows, 1 to 500. See `cols`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+}
+
+impl SessionCreateParams {
+    /// A structured session of `agent` in `cwd`, on the agent's defaults.
+    pub fn new(agent: AgentId, cwd: impl Into<String>) -> Self {
+        Self {
+            project_id: None,
+            agent,
+            model: None,
+            mode: SessionMode::Structured,
+            agent_mode: None,
+            cwd: Some(cwd.into()),
+            title: None,
+            cols: None,
+            rows: None,
+        }
+    }
 }
 
 /// Params naming one session.

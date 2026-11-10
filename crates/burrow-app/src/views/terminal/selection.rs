@@ -170,24 +170,41 @@ impl SelectionRange {
         (first <= last).then_some((first, last))
     }
 
-    /// The selected text: one line per grid line, without trailing spaces, joined by `\n`.
+    /// The selected text: one line per grid line, without trailing spaces, joined by `\n`. A
+    /// soft-wrapped line joins the next one without a break, its blank cells kept: it wrapped
+    /// because it was full.
     pub fn text(&self, grid: &TerminalGrid) -> String {
         let cols = usize::from(grid.cols());
-        let mut lines = Vec::new();
+        let mut out = String::new();
         for index in self.start.line..=self.end.line {
             let mut text = String::new();
+            let mut joined = false;
             if let (Some(line), Some((first, last))) = (grid.line(index), self.columns(index, cols))
             {
+                let mut width = 0;
                 for cell in line.cells() {
                     let end = cell.col + cell.width.max(1) - 1;
                     if cell.col <= last && end >= first {
                         text.push_str(cell.text);
+                        width += cell.width;
                     }
                 }
+                joined = line.wrapped && index < self.end.line;
+                if joined {
+                    let span = last + 1 - first;
+                    text.extend(std::iter::repeat_n(' ', span.saturating_sub(width)));
+                }
             }
-            lines.push(text.trim_end_matches(' ').to_owned());
+            if joined {
+                out.push_str(&text);
+            } else {
+                out.push_str(text.trim_end_matches(' '));
+                if index < self.end.line {
+                    out.push('\n');
+                }
+            }
         }
-        lines.join("\n")
+        out
     }
 }
 
@@ -287,6 +304,33 @@ mod tests {
         assert_eq!(drag(&grid, (0, 3, Left), (0, 3, Left)), "");
         // Within one cell, from its left half to its right half, selects it.
         assert_eq!(drag(&grid, (0, 3, Left), (0, 3, Right)), "l");
+    }
+
+    #[test]
+    fn soft_wrapped_lines_copy_as_one() {
+        // "hello world again" wrapped at 6 columns: the host trims "hello " to "hello".
+        let mut grid = TerminalGrid::new(6, 4);
+        let line = |text: &str, wrapped: bool| Line::plain(text).wrapped(wrapped);
+        grid.apply_snapshot(Snapshot {
+            cols: 6,
+            rows: 4,
+            cursor: Cursor::default(),
+            lines: vec![
+                IndexedLine::new(0, line("hello", true)),
+                IndexedLine::new(1, line("world", true)),
+                IndexedLine::new(2, line("again", false)),
+                IndexedLine::new(3, line("next", false)),
+            ],
+        });
+        assert_eq!(
+            drag(&grid, (0, 0, Side::Left), (3, 3, Side::Right)),
+            "hello world again\nnext"
+        );
+        // Ending on a wrapped line keeps no padding.
+        assert_eq!(
+            drag(&grid, (0, 0, Side::Left), (1, 5, Side::Right)),
+            "hello world"
+        );
     }
 
     #[test]

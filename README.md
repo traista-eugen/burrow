@@ -6,7 +6,7 @@ A fast, native desktop app for running AI coding agents. Burrow runs Claude Code
 
 No webviews. Rust and GPUI. Windows first.
 
-> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app runs sessions: a sidebar of projects and sessions, an inbox, a new session page that picks the agent, model and agent mode, and a session view with a model and mode picker, usage, limits, the prompt box, and a transcript that streams markdown and shows tool calls and diffs. See the [implementation plan](docs/plan.md) for what comes next.
+> **Status:** early. `burrowd` serves the protocol over a named pipe, keeps events across restarts, detects the installed agents, and runs agent sessions with an inbox for their permission requests; `burrowctl` drives it. Claude Code, Codex and Cursor run as sessions through ACP, and Muse Code through MSP. A scripted fake agent is there for trying things without spending quota. The desktop app runs sessions: a sidebar of projects and sessions, an inbox, a new session page that picks the agent, model and agent mode, and a session view with a model and mode picker, usage, limits, the prompt box, and a transcript that streams markdown and shows tool calls and diffs. Terminal sessions run an agent's own TUI inside the app, on a screen `burrowd` emulates, which `burrowctl` can attach to as well. See the [implementation plan](docs/plan.md) for what comes next.
 
 ## Build and run
 
@@ -144,6 +144,13 @@ Muse's approval modes are its agent modes: sessions start in `promptUnmatched`, 
 
 A terminal session runs an agent's own TUI inside Burrow: `burrowd` emulates the terminal, and any client can attach to the same screen. Starting a TUI spends no quota; only what you type into it does.
 
+In the app, pick **Terminal** on the new session page, then the agent and the folder, and **Start terminal**. The session view shows the TUI, with a status line under it. Keys go to the program, Ctrl+C and Esc included:
+- **Shift+Esc**, or a click in the sidebar, gives the keyboard back to the app; **Ctrl+L** or a click in the terminal returns it.
+- **Ctrl+Shift+C** and **Ctrl+Shift+V** copy and paste; **Ctrl+Shift+N**, **I** and **O** are the app's Ctrl+N, I and O.
+- When the program exits, its last screen stays readable and the status line gives the exit code.
+
+From a console, the same sessions:
+
 ```powershell
 cargo run -p burrowd -- --dev                                                   # terminal 1; --dev adds the fake TUI
 cargo run -p burrowctl -- session new --agent fake --mode terminal --attach     # terminal 2: type, or /flood 200
@@ -168,7 +175,7 @@ cargo run -p burrow-acp --example probe -- cursor   # or claude, codex
 
 Claude Code and Codex need their npm adapters installed first (`burrowctl agent install claude`); see [architecture.md](docs/architecture.md#acp-agents-as-verified).
 
-Try the terminal view (M4) on a local shell, before it is connected to `burrowd`. The demo runs `pwsh`, or any program you name, in ConPTY and draws it through the app's terminal view. In the terminal, Ctrl+Shift+C and Ctrl+Shift+V copy and paste; Ctrl+C goes to the program (D-041).
+Try the terminal view on a local shell, without `burrowd`. The demo runs `pwsh`, or any program you name, in ConPTY and draws it through the app's terminal view. In the terminal, Ctrl+Shift+C and Ctrl+Shift+V copy and paste; Ctrl+C goes to the program (D-041).
 
 ```powershell
 cargo run -p burrow-app --example terminal_demo              # or name a program: -- edit README.md

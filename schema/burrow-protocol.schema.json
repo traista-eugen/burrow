@@ -585,6 +585,17 @@
           "description": "The entity's id.",
           "type": "string"
         },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured or terminal, for sessions, so a list can mark terminal sessions."
+        },
         "projectId": {
           "description": "The project it belongs to, for sessions and runs.",
           "type": [
@@ -2292,6 +2303,13 @@
           "$ref": "#/$defs/SessionState",
           "description": "The current state."
         },
+        "terminalId": {
+          "description": "A terminal session's terminal (`trm_…`), for `terminal/attach`, once its program has started. It stays after the program exits: a closed terminal can still be attached, until the session is archived or `burrowd` restarts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "title": {
           "description": "The display name. Set from the first prompt when `session/create` didn't give one; `session/rename` changes it.",
           "type": [
@@ -2347,6 +2365,16 @@
             "null"
           ]
         },
+        "cols": {
+          "description": "A terminal session's starting width in columns, 2 to 1000, so its program draws its first screen at the size the client shows. Given with `rows`, or neither; only with `mode: \"terminal\"`. Without them the terminal starts at 120 × 32.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "cwd": {
           "description": "The folder the agent works in, as an absolute path. Required without `projectId`.",
           "type": [
@@ -2370,6 +2398,16 @@
           "description": "The project to work in. Its folder is the default `cwd`.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "description": "A terminal session's starting height in rows, 1 to 500. See `cols`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -2624,6 +2662,11 @@
             }
           ],
           "description": "When a turn last started or ended; `createdAt` until the first prompt. Lists are sorted by it, most recent first."
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode",
+          "default": "structured",
+          "description": "Structured or terminal. Absent from an older `burrowd`: structured."
         },
         "model": {
           "description": "The model, if known.",

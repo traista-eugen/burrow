@@ -5,10 +5,12 @@
 //! - Archived sessions are hidden; the toggle under the lists shows them, dimmed.
 //! - "5m" times are redrawn when one of them would change, not on a fixed tick (see
 //!   [`super::workspace::Workspace`]'s clock).
+//! - Terminal sessions show a terminal icon in their state's colour, where others show a dot.
+//! - A click anywhere in the sidebar takes the keyboard from a focused terminal.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     px,
 };
@@ -196,6 +198,12 @@ pub fn render(
 
     div()
         .id("sidebar")
+        // A click anywhere here takes the keyboard from a terminal (D-043); a session row then
+        // gives it to the session it opens.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| this.release_focus(window, cx)),
+        )
         .w(px(WIDTH))
         .flex_shrink_0()
         .h_full()
@@ -363,6 +371,14 @@ fn session_row(
                         .size(px(11.))
                         .flex_shrink_0()
                         .text_color(theme.muted_foreground),
+                )
+            } else if session.terminal {
+                // A terminal session: the agent's own TUI, in the state's colour.
+                row.child(
+                    Icon::new(IconName::SquareTerminal)
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .text_color(dot),
                 )
             } else {
                 row.child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(dot))

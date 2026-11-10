@@ -101,6 +101,7 @@ mod tests {
             project_id: None,
             state: Some("idle".into()),
             agent: None,
+            mode: None,
         });
         let record = record(&event);
         assert_eq!(record.event_type, "entityCreated");

@@ -22,6 +22,10 @@
 //! - **Actions:** cancel the turn (Esc), stop the agent, archive (with a confirmation), rename
 //!   inline (the pencil, or double-click the title; Enter keeps, Esc drops), and open the
 //!   session's folder in Explorer.
+//! - **Terminal sessions** have no pickers or usage: the agent's TUI handles those. The second
+//!   row says it is a terminal and shows the window title the program set; the state reads
+//!   "running" while the program runs, and the reason a stopped or failed session gives has its
+//!   exit code.
 //!
 //! [`SessionLog::session`]: crate::state::session::SessionLog::session
 //! [`SessionLog::turn_usage`]: crate::state::session::SessionLog::turn_usage
@@ -30,7 +34,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use burrow_protocol::{
-    AgentMode, ModelInfo, ProviderUsage, Session, SessionState, SessionUsage, Timestamp,
+    AgentMode, ModelInfo, ProviderUsage, Session, SessionMode, SessionState, SessionUsage,
+    Timestamp,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -50,11 +55,14 @@ use crate::actions::{CancelRename, RENAME_CONTEXT};
 use crate::state::AppState;
 use crate::state::session::{LoadStatus, SessionStore};
 use crate::theme;
+use crate::views::session::terminal::SessionTerminal;
 use crate::views::{countdown, dialogs, local_time, now_millis, report_failure};
 
 pub struct SessionHeader {
     store: Entity<SessionStore>,
     state: Entity<AppState>,
+    /// A terminal session's terminal, for the title its program set.
+    terminal: Option<Entity<SessionTerminal>>,
     /// The inline title editor, while renaming.
     renaming: Option<Renaming>,
     /// Whether `usage/get` was asked during the current limited spell.
@@ -90,6 +98,7 @@ impl SessionHeader {
         let mut this = Self {
             store,
             state,
+            terminal: None,
             renaming: None,
             usage_refreshed: false,
             ticking: false,
@@ -98,6 +107,14 @@ impl SessionHeader {
         };
         this.follow_state(cx);
         this
+    }
+
+    /// Shows a terminal session's terminal facts.
+    pub fn set_terminal(&mut self, terminal: Entity<SessionTerminal>, cx: &mut Context<Self>) {
+        self._subscriptions
+            .push(cx.observe(&terminal, |_, _, cx| cx.notify()));
+        self.terminal = Some(terminal);
+        cx.notify();
     }
 
     /// Asks for usage once per limited spell, and runs the countdown ticker while one shows.
@@ -363,6 +380,13 @@ impl Render for SessionHeader {
         let agent_name = session.as_ref().map(|s| app.agent_name(&s.agent));
         let limit = session.as_ref().and_then(|s| Limit::of(s, app.usage()));
         let title = self.title(cx);
+        let terminal_mode = session
+            .as_ref()
+            .is_some_and(|s| s.mode == SessionMode::Terminal);
+        let program_title = self
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.read(cx).title().map(str::to_owned));
 
         // ---- State indicator ----
         let color = theme::state_color(&state, cx);
@@ -370,9 +394,15 @@ impl Render for SessionHeader {
             .as_ref()
             .filter(|s| matches!(s.state, SessionState::Stopped | SessionState::Failed))
             .and_then(|s| s.reason.clone());
+        let running = terminal_mode && state == SessionState::Idle;
+        let description = if running {
+            "The agent's own program runs in a terminal."
+        } else {
+            theme::state_description(&state)
+        };
         let pill_tooltip: SharedString = match &reason {
-            Some(reason) => format!("{} {reason}", theme::state_description(&state)),
-            None => theme::state_description(&state).to_owned(),
+            Some(reason) => format!("{description} {reason}"),
+            None => description.to_owned(),
         }
         .into();
         let spinning = matches!(state, SessionState::Starting | SessionState::Working);
@@ -398,7 +428,11 @@ impl Render for SessionHeader {
                     pill.child(div().size(px(6.)).rounded_full().bg(color))
                 }
             })
-            .child(theme::state_label(&state))
+            .child(if running {
+                "running".to_owned()
+            } else {
+                theme::state_label(&state)
+            })
             .tooltip(move |window, cx| Tooltip::new(pill_tooltip.clone()).build(window, cx));
 
         // ---- Actions ----
@@ -481,7 +515,24 @@ impl Render for SessionHeader {
         if let Some(name) = agent_name {
             facts = facts.child(div().flex_shrink_0().child(name));
         }
-        if let Some(session) = &session {
+        if terminal_mode {
+            facts = facts
+                .child(div().child("·"))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(IconName::SquareTerminal).xsmall())
+                        .child("Terminal"),
+                )
+                .when_some(program_title, |facts, title| {
+                    facts
+                        .child(div().child("·"))
+                        .child(div().min_w_0().truncate().child(title))
+                });
+        } else if let Some(session) = &session {
             facts = facts
                 .child(div().child("·"))
                 .child(self.model_picker(session, cx))
@@ -551,18 +602,23 @@ impl Render for SessionHeader {
                             .child(facts)
                             .children(usage),
                     )
-                    .when_some(reason.or(load_error), |col, reason| {
-                        col.child(
-                            div()
-                                .text_xs()
-                                .text_color(if state == SessionState::Failed {
-                                    theme.danger
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(reason),
-                        )
-                    }),
+                    // A terminal session's status line says why it ended, so the terminal's
+                    // area keeps its height and its last screen stays whole.
+                    .when_some(
+                        reason.filter(|_| !terminal_mode).or(load_error),
+                        |col, reason| {
+                            col.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if state == SessionState::Failed {
+                                        theme.danger
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(reason),
+                            )
+                        },
+                    ),
             )
             .when_some(limit, |col, limit| {
                 let mut text = format!(
@@ -736,6 +792,7 @@ mod tests {
             agent: AgentId::Claude,
             model: None,
             mode: SessionMode::Structured,
+            terminal_id: None,
             cwd: "D:\\repo".into(),
             title: None,
             state,

@@ -107,6 +107,25 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// The grid a terminal view of `size` would fit, padding included, in `options`' font: for
+/// starting a program at the size it will be shown in.
+pub fn grid_fitting(
+    size: gpui::Size<Pixels>,
+    options: &TerminalOptions,
+    window: &Window,
+) -> (u16, u16) {
+    let family = match &options.font_family {
+        Some(family) => family.to_string(),
+        None => render::pick_family(window).to_owned(),
+    };
+    let metrics = CellMetrics::measure(&family, options.font_size, window);
+    grid_size(
+        (size.width - PADDING * 2.0).into(),
+        (size.height - PADDING * 2.0).into(),
+        metrics.cell_size(),
+    )
+}
+
 /// What the terminal view asks of whoever runs the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
@@ -174,6 +193,9 @@ pub struct TerminalView {
     marked: Option<String>,
     /// The view has focus; the cursor blinks only then.
     focused: bool,
+    /// The program has exited: nothing is sent, and no cursor is drawn. Selecting, copying and
+    /// scrolling back still work.
+    disabled: bool,
     /// The cursor is in the visible half of its blink, and a task is blinking it.
     blink_on: bool,
     blinking: bool,
@@ -219,6 +241,7 @@ impl TerminalView {
             moved: None,
             marked: None,
             focused: false,
+            disabled: false,
             blink_on: true,
             blinking: false,
             last_activity: Instant::now(),
@@ -308,6 +331,23 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Disables input, for a terminal whose program has exited: keys, pastes and the mouse send
+    /// nothing, and no cursor is drawn. The last screen stays, and can be selected, copied and
+    /// scrolled back.
+    pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            self.held = None;
+            self.marked = None;
+            cx.notify();
+        }
+    }
+
+    /// Whether input is disabled.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
     /// Sets the input modes the emulator reports.
     pub fn set_modes(&mut self, modes: Modes, cx: &mut Context<Self>) {
         if modes != self.grid.modes() {
@@ -324,7 +364,7 @@ impl TerminalView {
 
     /// Sends bytes the user typed: back to the bottom, selection gone, cursor shown.
     fn send(&mut self, bytes: String, cx: &mut Context<Self>) {
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.disabled {
             return;
         }
         self.scroll.reset();
@@ -340,7 +380,7 @@ impl TerminalView {
     fn activity(&mut self, cx: &mut Context<Self>) {
         self.last_activity = Instant::now();
         self.blink_on = true;
-        if !self.options.blink || !self.focused || self.blinking {
+        if !self.options.blink || !self.focused || self.blinking || self.disabled {
             return;
         }
         self.blinking = true;
@@ -368,7 +408,9 @@ impl TerminalView {
 
     fn focus_changed(&mut self, focused: bool, cx: &mut Context<Self>) {
         self.focused = focused;
-        if let Some(bytes) = input::encode_focus(focused, &self.grid.modes()) {
+        if let Some(bytes) = input::encode_focus(focused, &self.grid.modes())
+            && !self.disabled
+        {
             cx.emit(TerminalEvent::Input(bytes.to_owned()));
         }
         self.activity(cx);
@@ -378,7 +420,7 @@ impl TerminalView {
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // While composing, keys belong to the IME; characters AltGr or dead keys make arrive as
         // text through the input handler.
-        if self.marked.is_some() || event.prefer_character_input {
+        if self.marked.is_some() || event.prefer_character_input || self.disabled {
             return;
         }
         if let Some(bytes) = input::encode_key(&event.keystroke, &self.grid.modes()) {
@@ -420,7 +462,7 @@ impl TerminalView {
 
     /// Whether the program takes the mouse, unless Shift is held, which always selects.
     fn reports_mouse(&self, shift: bool) -> bool {
-        self.grid.modes().mouse != MouseMode::Off && !shift
+        self.grid.modes().mouse != MouseMode::Off && !shift && !self.disabled
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -509,6 +551,7 @@ impl TerminalView {
             return;
         }
         if self.bounds.contains(&event.position)
+            && self.reports_mouse(false)
             && self.grid.modes().mouse == MouseMode::Motion
             && self.moved != Some((col, row))
         {
@@ -578,7 +621,9 @@ impl TerminalView {
             return;
         }
         let count = lines.abs().round().max(1.0) as usize;
-        if let Some(bytes) = input::encode_alternate_scroll(lines > 0.0, count, &modes) {
+        if let Some(bytes) = input::encode_alternate_scroll(lines > 0.0, count, &modes)
+            && !self.disabled
+        {
             cx.emit(TerminalEvent::Input(bytes));
             cx.stop_propagation();
             return;
@@ -725,6 +770,7 @@ impl TerminalView {
                 .map(|cell| (cell.text.to_owned(), cell.width, cell.style.flags))
         });
         let cursor_paint = (cursor.visible
+            && !self.disabled
             && on_screen
             && self.marked.is_none()
             && (self.blink_on || !focused))
@@ -774,7 +820,7 @@ impl TerminalView {
 /// Paints a frame and registers the mouse and keyboard input for the next one.
 fn paint(frame: Frame, view: &Entity<TerminalView>, window: &mut Window, cx: &mut App) {
     let started = Instant::now();
-    let reports_mouse = view.read(cx).grid.modes().mouse != MouseMode::Off;
+    let reports_mouse = view.read(cx).reports_mouse(false);
     window.set_cursor_style(
         if reports_mouse {
             CursorStyle::Arrow
@@ -921,7 +967,7 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
+        self.marked = (!new_text.is_empty() && !self.disabled).then(|| new_text.to_owned());
         cx.notify();
     }
 

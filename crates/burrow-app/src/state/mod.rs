@@ -5,6 +5,8 @@
 //!   provider usage from `usage/get`. It also owns the connection loop and the index
 //!   subscription, and has the calls views make (`prompt`, `respond`, `set_model`, …).
 //! - [`session::SessionStore`] (one per open session): the session's events and metadata.
+//! - [`terminals::TerminalHub`] (one per app, owned by [`AppState`]): attachments to the
+//!   terminals of terminal sessions, routed to their views and kept across reconnects.
 //! - [`transcript::TranscriptModel`]: a session's events grouped into the transcript's rows; the
 //!   transcript view keeps one per open session.
 //!
@@ -14,6 +16,7 @@
 
 pub mod index;
 pub mod session;
+pub mod terminals;
 pub mod transcript;
 
 use std::collections::{HashMap, HashSet};
@@ -32,10 +35,11 @@ use burrow_protocol::{
     SessionListParams, SessionPromptParams, SessionPromptResult, SessionRenameParams,
     SessionSetAgentModeParams, SessionSetModelParams, SessionSummary, StreamName,
 };
-use gpui::{App, AppContext as _, Context, EventEmitter, Task};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task};
 use tracing::warn;
 
 use self::index::{Applied, Fetch, IndexModel};
+use self::terminals::TerminalHub;
 use crate::backend::{self, Backend, ConnectionStatus, FollowEvent};
 
 /// An `agent/install` this app started.
@@ -71,6 +75,7 @@ pub struct AppState {
     load_generation: u64,
     /// Fetches in flight, so one event storm doesn't fetch the same thing twice.
     fetching: HashSet<Fetch>,
+    terminals: Entity<TerminalHub>,
     _connection: Task<()>,
     _index: Task<()>,
 }
@@ -113,6 +118,7 @@ impl AppState {
             usage: Vec::new(),
             load_generation: 0,
             fetching: HashSet::new(),
+            terminals: cx.new(TerminalHub::new),
             _connection: connection,
             _index: index,
         }
@@ -126,6 +132,11 @@ impl AppState {
     /// Projects, sessions and open inbox items.
     pub fn index(&self) -> &IndexModel {
         &self.index
+    }
+
+    /// The attachments to terminals.
+    pub fn terminals(&self) -> &Entity<TerminalHub> {
+        &self.terminals
     }
 
     /// The agents `burrowd` offers, as last detected.

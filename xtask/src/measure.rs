@@ -222,6 +222,8 @@ async fn seed(pipe: &str, project: &Path, options: &Options) -> Result<Vec<Strin
                     agent_mode: None,
                     cwd: None,
                     title: None,
+                    cols: None,
+                    rows: None,
                 })
                 .await
                 .map_err(|error| format!("session/create: {error}"))?;

@@ -19,8 +19,8 @@ use crate::inbox::InboxAction;
 use crate::open_enum::doc_text;
 use crate::session::{
     AgentMessageChunk, AgentModeChanged, AgentThoughtChunk, LimitReached, ModelChanged,
-    PermissionRequested, PermissionResolved, Plan, StateChanged, TerminalClosed, TerminalOpened,
-    ToolCall, ToolCallUpdate, TurnEnded, Usage, UserMessage,
+    PermissionRequested, PermissionResolved, Plan, SessionMode, StateChanged, TerminalClosed,
+    TerminalOpened, ToolCall, ToolCallUpdate, TurnEnded, Usage, UserMessage,
 };
 use crate::time::Timestamp;
 
@@ -232,6 +232,9 @@ pub struct EntityCreated {
     /// The agent, for sessions, so a list entry needs no `session/get`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentId>,
+    /// Structured or terminal, for sessions, so a list can mark terminal sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SessionMode>,
 }
 
 /// `entityRenamed`: an entity's display name changed.

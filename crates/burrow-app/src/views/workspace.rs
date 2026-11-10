@@ -6,6 +6,9 @@
 //! - **The clock.** Relative times ("5m") in the sidebar and the inbox are redrawn when the
 //!   first of them would change ([`super::relative_time_changes_in`]): once a minute while
 //!   something is less than an hour old, else hourly, and not at all when nothing shows a time.
+//! - **Leaving a terminal.** A focused terminal takes the app's keys (D-041). Shift+Esc
+//!   ([`LeaveTerminal`]) or a click in the sidebar gives the keyboard back to the workspace,
+//!   and Ctrl+L or a click in the terminal returns it (D-043).
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +23,7 @@ use super::new_session::{NewSessionEvent, NewSessionView};
 use super::session::SessionView;
 use super::{empty, inbox, notify_error, now_millis, relative_time_changes_in, sidebar};
 use crate::actions::{
-    AddProject, FocusPrompt, NewSession, NextSession, PreviousSession, ToggleInbox,
+    AddProject, FocusPrompt, LeaveTerminal, NewSession, NextSession, PreviousSession, ToggleInbox,
 };
 use crate::state::{AppState, AppStateEvent};
 
@@ -174,14 +177,24 @@ impl Workspace {
         self.inbox_open
     }
 
-    /// Opens a session in the main area and focuses its prompt.
+    /// Takes the keyboard from whatever has it, a terminal say, and gives it to the workspace,
+    /// where the app's keys work.
+    pub fn release_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+    }
+
+    /// Opens a session in the main area and focuses its prompt, or its terminal.
     pub fn open_session(
         &mut self,
         session_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_session(cx).as_deref() == Some(session_id.as_str()) {
+        if let Main::Session(view) = &self.main
+            && view.read(cx).session_id() == session_id
+        {
+            // Already open: back to its prompt or terminal.
+            view.update(cx, |view, cx| view.focus_prompt(window, cx));
             return;
         }
         let view = match self
@@ -215,8 +228,15 @@ impl Workspace {
             &view,
             window,
             |this, _, event: &NewSessionEvent, window, cx| match event {
-                NewSessionEvent::Created(session_id) => {
-                    this.open_session(session_id.clone(), window, cx)
+                NewSessionEvent::Created {
+                    session_id,
+                    terminal,
+                } => {
+                    this.open_session(session_id.clone(), window, cx);
+                    // Its terminal started at this window's size: it keeps following it.
+                    if *terminal && let Main::Session(view) = &this.main {
+                        view.update(cx, |view, _| view.started_here());
+                    }
                 }
                 NewSessionEvent::Dismissed => {
                     this.main = Main::Empty;
@@ -306,6 +326,15 @@ impl Workspace {
         }
     }
 
+    fn on_leave_terminal(
+        &mut self,
+        _: &LeaveTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.release_focus(window, cx);
+    }
+
     fn on_toggle_inbox(&mut self, _: &ToggleInbox, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_inbox(cx);
     }
@@ -348,6 +377,7 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_new_session))
             .on_action(cx.listener(Self::on_focus_prompt))
+            .on_action(cx.listener(Self::on_leave_terminal))
             .on_action(cx.listener(Self::on_toggle_inbox))
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_next_session))

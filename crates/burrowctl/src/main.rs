@@ -504,6 +504,8 @@ impl Ctl {
                             format!("can't read the current directory: {error}")
                         })?),
                     };
+                // Attaching from this console: start the terminal at its size.
+                let size = attach.then(terminal::console_size).flatten();
                 let params = SessionCreateParams {
                     project_id: project,
                     agent: AgentId::from(agent),
@@ -515,6 +517,8 @@ impl Ctl {
                     agent_mode,
                     cwd: cwd.map(|cwd| cwd.display().to_string()),
                     title,
+                    cols: size.map(|size| size.cols),
+                    rows: size.map(|size| size.rows),
                 };
                 let session = client
                     .call::<SessionCreate>(&params)
@@ -523,7 +527,11 @@ impl Ctl {
                 if mode != ModeArg::Terminal {
                     return self.print(&session, || render::session(&session));
                 }
-                let terminal = terminal::resolve(&client, &session.id).await?;
+                let terminal = match session.terminal_id.clone() {
+                    Some(terminal) => terminal,
+                    // An older burrowd: its stream says.
+                    None => terminal::resolve(&client, &session.id).await?,
+                };
                 if attach {
                     return self.attach(&client, &terminal).await;
                 }

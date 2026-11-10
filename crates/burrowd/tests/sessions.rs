@@ -36,6 +36,8 @@ fn create_params(cwd: &Path) -> SessionCreateParams {
         agent_mode: None,
         cwd: Some(cwd.display().to_string()),
         title: None,
+        cols: None,
+        rows: None,
     }
 }
 

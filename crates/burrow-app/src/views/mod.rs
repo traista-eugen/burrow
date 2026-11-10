@@ -14,7 +14,10 @@
 //! │ RUNS       │      │ transcript ─────── session/transcript │ action      │
 //! │            │      │                                       │ buttons     │
 //! │ ● status   │      └ prompt box ─────── session/prompt.rs  │             │
-//! │ 🔔 inbox  3 │                                              │             │
+//! │ 🔔 inbox  3 │      or, for a terminal session:             │             │
+//! │            │      ┌ header ─────────── session/header.rs  │             │
+//! │            │      │ terminal ───────── session/terminal.rs│             │
+//! │            │      └ status line                           │             │
 //! └────────────┴──────────────────────────────────────────────┴─────────────┘
 //! ```
 //!
@@ -24,11 +27,13 @@
 //!   actions ([`crate::actions`]). The sidebar ([`sidebar`]) and the inbox panel ([`inbox`]) are
 //!   render functions of it. [`dialogs`] has the rename and archive dialogs the header and the
 //!   sidebar share.
-//! - [`session::SessionView`] is one open session. It owns a [`SessionStore`] and three child
+//! - [`session::SessionView`] is one open session. It owns a [`SessionStore`] and child
 //!   entities that each read the store:
 //!   - [`session::header::SessionHeader`]: title, agent, state, and the session's controls;
-//!   - [`session::transcript::Transcript`]: the conversation;
-//!   - [`session::prompt::PromptBox`]: the multi-line prompt box.
+//!   - for a structured session, [`session::transcript::Transcript`] (the conversation) and
+//!     [`session::prompt::PromptBox`] (the multi-line prompt box);
+//!   - for a terminal session, [`session::terminal::SessionTerminal`]: the agent's TUI, attached
+//!     through [`crate::state::terminals::TerminalHub`], with a status line.
 //!
 //! # Boundaries for the next work
 //!
@@ -47,10 +52,10 @@
 //!   (`set_model`, `set_agent_mode`, `rename`, `stop`, `archive`, `cancel`).
 //! - **Prompt box** (`session/prompt.rs`): reads the state and [`SessionLog::prompts`] for its
 //!   history; sends through [`AppState::prompt`].
-//! - **Terminal** (`terminal/`, M4): [`terminal::TerminalView`] draws a terminal `burrowd`
-//!   emulates. It isn't in the layout yet; M4's phase 2 shows it for terminal-mode sessions. Its
-//!   interface (snapshots and updates in, input, resizes and history requests out) is described
-//!   in `terminal/mod.rs`.
+//! - **Terminal** (`terminal/`): [`terminal::TerminalView`] draws a terminal `burrowd`
+//!   emulates. Its interface (snapshots and updates in, input, resizes and history requests out)
+//!   is described in `terminal/mod.rs`; `session/terminal.rs` connects it to a session's
+//!   terminal.
 //! - Shared state lives in [`crate::state`]; views keep only view state (selection, scroll,
 //!   focus).
 //!
@@ -71,7 +76,8 @@ pub mod inbox;
 pub mod new_session;
 pub mod session;
 pub mod sidebar;
-// The session view uses it from M4's phase 2; until then only its tests and the demo do.
+// Some of its interface (the line builders, frame statistics, the grid accessor) is used only
+// by its tests and the `terminal_demo` example, which compile it as their own module.
 #[allow(dead_code)]
 pub mod terminal;
 pub mod workspace;

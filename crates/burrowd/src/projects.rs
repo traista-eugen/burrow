@@ -102,6 +102,7 @@ impl Projects {
                     project_id: None,
                     state: None,
                     agent: None,
+                    mode: None,
                 },
             )
             .put(KIND, &project.id, &project);

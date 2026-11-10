@@ -1,6 +1,11 @@
-//! The new session page: pick the agent, where it works, its model and agent mode, type the
-//! first prompt, start.
+//! The new session page: chat or terminal, pick the agent, where it works, its model and agent
+//! mode, type the first prompt, start.
 //!
+//! - **Chat or terminal.** A chat (structured) session shows the conversation in Burrow's
+//!   transcript, with a prompt box. A terminal session runs the agent's own TUI in Burrow's
+//!   terminal, so the page asks for no model, mode or prompt: the TUI does. Any installed agent
+//!   can run in a terminal, whether or not its ACP adapter is installed or it is logged in. The
+//!   terminal starts at the size the session's terminal will have in this window.
 //! - **Agents** come from `agent/list`. One that can't start shows its `problem` and can't be
 //!   picked. One whose ACP adapter is missing (Claude Code, Codex) offers **Install**, which runs
 //!   `agent/install` with its progress and any error on the card; once installed it is picked.
@@ -14,14 +19,19 @@
 //! - **Start** calls `session/create`, which answers once the agent is ready, then sends the
 //!   prompt, if any, and opens the session.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
-use burrow_protocol::{AgentId, AgentInfo, AgentMode, ModelInfo, SessionCreateParams};
+use burrow_protocol::{
+    AgentId, AgentInfo, AgentMode, ModelInfo, SessionCreateParams, SessionMode, TerminalSize,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
+    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas,
+    div, px, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
@@ -31,11 +41,18 @@ use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable
 use gpui_kit_assets::IconName as Lucide;
 
 use crate::state::{AppState, InstallStatus, describe_error};
+use crate::views::session::terminal::STATUS_LINE;
+use crate::views::terminal::{TerminalOptions, grid_fitting};
+
+/// The height of a session's header above its terminal, without a reason line: what the main
+/// area loses before the terminal starts.
+const SESSION_HEADER: f32 = 74.0;
 
 /// What the page asks the workspace to do.
 pub enum NewSessionEvent {
-    /// A session started: open it.
-    Created(String),
+    /// A session started: open it. `terminal`: a terminal session, started at this window's
+    /// size.
+    Created { session_id: String, terminal: bool },
     /// The page was closed.
     Dismissed,
 }
@@ -51,6 +68,8 @@ enum Target {
 
 pub struct NewSessionView {
     state: Entity<AppState>,
+    /// Chat (structured) or terminal.
+    mode: SessionMode,
     agent: Option<AgentId>,
     /// An agent whose install was started here: picked once it is available.
     installing: Option<AgentId>,
@@ -66,6 +85,8 @@ pub struct NewSessionView {
     error: Option<String>,
     /// Redraws every second while an install runs, for its elapsed time.
     ticker: Option<Task<()>>,
+    /// The page's bounds when last drawn: the main area a new session's view will fill.
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,6 +123,7 @@ impl NewSessionView {
         ];
         let mut this = Self {
             state,
+            mode: SessionMode::Structured,
             agent: None,
             installing: None,
             target: project.map(Target::Project),
@@ -112,6 +134,7 @@ impl NewSessionView {
             detecting: false,
             error: None,
             ticker: None,
+            bounds: Rc::default(),
             _subscriptions: subscriptions,
         };
         this.pick_defaults(cx);
@@ -128,7 +151,8 @@ impl NewSessionView {
     /// agent installed from here once it is available.
     fn pick_defaults(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let available = |id: &AgentId| state.agent(id).is_some_and(|agent| agent.available);
+        let mode = self.mode;
+        let available = |id: &AgentId| state.agent(id).is_some_and(|agent| can_start(agent, mode));
         if let Some(installed) = self.installing.clone()
             && available(&installed)
         {
@@ -140,7 +164,7 @@ impl NewSessionView {
             let first = state
                 .agents()
                 .iter()
-                .find(|agent| agent.available)
+                .find(|agent| can_start(agent, mode))
                 .map(|agent| agent.id.clone());
             if first != self.agent {
                 self.agent = first;
@@ -160,6 +184,35 @@ impl NewSessionView {
                 .first()
                 .map(|p| Target::Project(p.id.clone()));
         }
+    }
+
+    /// Switches between a chat and a terminal session.
+    fn select_mode(&mut self, mode: SessionMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.error = None;
+        self.pick_defaults(cx);
+        if mode == SessionMode::Structured {
+            self.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The grid a terminal session's view will fit in this window: the main area, less the
+    /// session's header and the terminal's status line.
+    fn terminal_size(&self, window: &Window) -> Option<TerminalSize> {
+        let bounds = self.bounds.get()?;
+        let area = size(
+            bounds.size.width,
+            bounds.size.height - px(SESSION_HEADER + STATUS_LINE),
+        );
+        let (cols, rows) = grid_fitting(area, &TerminalOptions::default(), window);
+        Some(TerminalSize {
+            cols: cols.clamp(TerminalSize::MIN_COLS, TerminalSize::MAX_COLS),
+            rows: rows.clamp(TerminalSize::MIN_ROWS, TerminalSize::MAX_ROWS),
+        })
     }
 
     fn select_agent(&mut self, agent: AgentId) {
@@ -287,7 +340,18 @@ impl NewSessionView {
             cx.notify();
             return;
         };
-        let text = self.prompt.read(cx).value().trim().to_owned();
+        let agent_name = self.state.read(cx).agent_name(&agent);
+        let terminal = self.mode == SessionMode::Terminal;
+        let text = if terminal {
+            String::new()
+        } else {
+            self.prompt.read(cx).value().trim().to_owned()
+        };
+        let size = if terminal {
+            self.terminal_size(window)
+        } else {
+            None
+        };
         self.busy = true;
         self.error = None;
         cx.notify();
@@ -300,11 +364,14 @@ impl NewSessionView {
             SessionCreateParams {
                 project_id,
                 agent,
-                model: self.model.clone(),
-                mode: Default::default(),
-                agent_mode: self.agent_mode.clone(),
+                model: self.model.clone().filter(|_| !terminal),
+                mode: self.mode,
+                agent_mode: self.agent_mode.clone().filter(|_| !terminal),
                 cwd,
-                title: None,
+                // A terminal session has no first prompt to take its title from.
+                title: terminal.then(|| agent_name.clone()),
+                cols: size.map(|size| size.cols),
+                rows: size.map(|size| size.rows),
             },
             cx,
         );
@@ -335,7 +402,10 @@ impl NewSessionView {
             }
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                cx.emit(NewSessionEvent::Created(session.id));
+                cx.emit(NewSessionEvent::Created {
+                    session_id: session.id,
+                    terminal,
+                });
             });
         })
         .detach();
@@ -344,17 +414,23 @@ impl NewSessionView {
     fn agent_card(&self, agent: &AgentInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let selected = self.agent.as_ref() == Some(&agent.id);
-        let available = agent.available;
+        let terminal = self.mode == SessionMode::Terminal;
+        let available = can_start(agent, self.mode);
         let id = agent.id.clone();
-        let detail = match (&agent.version, available) {
-            (Some(version), true) => format!("{} · {version}", agent.integration),
-            (None, true) => agent.integration.to_string(),
-            (_, false) => "Unavailable".to_owned(),
+        let detail = match (&agent.version, available, terminal) {
+            (Some(version), true, true) => format!("its own TUI · {version}"),
+            (None, true, true) => "its own TUI".to_owned(),
+            (Some(version), true, false) => format!("{} · {version}", agent.integration),
+            (None, true, false) => agent.integration.to_string(),
+            (_, false, true) => "Not installed".to_owned(),
+            (_, false, false) => "Unavailable".to_owned(),
         };
+        // A terminal session runs the agent's own program: no adapter, and it can log in there.
+        let problem = agent.problem.clone().filter(|_| !terminal || !available);
         let install = agent
             .adapter
             .as_ref()
-            .filter(|adapter| !adapter.installed)
+            .filter(|adapter| !adapter.installed && !terminal)
             .map(|adapter| {
                 let status = self.state.read(cx).install_status(&agent.id).cloned();
                 self.install_row(&agent.id, &adapter.package, &adapter.version, status, cx)
@@ -405,7 +481,7 @@ impl NewSessionView {
                     .text_color(theme.muted_foreground)
                     .child(detail),
             )
-            .when_some(agent.problem.clone(), |card, problem| {
+            .when_some(problem, |card, problem| {
                 card.child(
                     div()
                         .text_xs()
@@ -658,6 +734,15 @@ impl NewSessionView {
     }
 }
 
+/// Whether `agent` can start a session in `mode`: a chat needs it available (installed, logged
+/// in, with its adapter); a terminal only needs it installed, since its TUI logs in itself.
+fn can_start(agent: &AgentInfo, mode: SessionMode) -> bool {
+    match mode {
+        SessionMode::Structured => agent.available,
+        SessionMode::Terminal => agent.installed,
+    }
+}
+
 fn label_of(models: &[ModelInfo], id: &str) -> String {
     models
         .iter()
@@ -705,6 +790,7 @@ impl Render for NewSessionView {
             .map(|agent| agent.name.clone())
             .unwrap_or_else(|| "the agent".into());
         let can_start = connected && self.agent.is_some() && self.target.is_some() && !self.busy;
+        let terminal = self.mode == SessionMode::Terminal;
 
         let label = |text: &'static str| {
             div()
@@ -786,13 +872,69 @@ impl Render for NewSessionView {
 
         let note = selected_agent
             .as_ref()
-            .filter(|agent| agent.available)
+            .filter(|agent| agent.available && !terminal)
             .and_then(|agent| Some((agent.name.clone(), agent.problem.clone()?)));
+
+        let mode_button = |id: &'static str, label: &'static str, icon: IconName, mode| {
+            let selected = self.mode == mode;
+            Button::new(id)
+                .small()
+                .icon(icon)
+                .label(label)
+                .map(|b| if selected { b.primary() } else { b.outline() })
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.select_mode(mode, window, cx)),
+                )
+        };
+        let mode_row = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(mode_button(
+                        "mode-chat",
+                        "Chat",
+                        IconName::Bot,
+                        SessionMode::Structured,
+                    ))
+                    .child(mode_button(
+                        "mode-terminal",
+                        "Terminal",
+                        IconName::SquareTerminal,
+                        SessionMode::Terminal,
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(if terminal {
+                        "The agent's own TUI, in Burrow's terminal. Its model, its mode and its \
+                         questions are handled there; burrowctl can attach to it too."
+                    } else {
+                        "Burrow shows the conversation, the tool calls and the permission \
+                         requests, and the inbox collects the questions."
+                    }),
+            );
+        let page_bounds = self.bounds.clone();
 
         div()
             .id("new-session")
             .size_full()
+            .relative()
             .overflow_y_scroll()
+            // Notes the page's size: the area a terminal session will have.
+            .child(
+                canvas(
+                    move |bounds, _, _| page_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(
                 div()
                     .max_w(px(760.))
@@ -824,6 +966,7 @@ impl Render for NewSessionView {
                                     })),
                             ),
                     )
+                    .child(section("Session").child(mode_row))
                     .child(
                         div()
                             .flex()
@@ -853,7 +996,7 @@ impl Render for NewSessionView {
                             .child(agent_grid),
                     )
                     .child(section("Where").child(where_row))
-                    .when_some(selected_agent.clone(), |page, agent| {
+                    .when_some(selected_agent.clone().filter(|_| !terminal), |page, agent| {
                         page.child(
                             div()
                                 .flex()
@@ -906,7 +1049,9 @@ impl Render for NewSessionView {
                                 ),
                         )
                     })
-                    .child(section("Prompt").child(Textarea::new(&self.prompt)))
+                    .when(!terminal, |page| {
+                        page.child(section("Prompt").child(Textarea::new(&self.prompt)))
+                    })
                     .child(
                         div()
                             .flex()
@@ -916,10 +1061,10 @@ impl Render for NewSessionView {
                                 Button::new("start-session")
                                     .primary()
                                     .icon(IconName::ArrowUp)
-                                    .label(if self.busy {
-                                        format!("Starting {agent_name}…")
-                                    } else {
-                                        "Start session".to_owned()
+                                    .label(match (self.busy, terminal) {
+                                        (true, _) => format!("Starting {agent_name}…"),
+                                        (false, true) => "Start terminal".to_owned(),
+                                        (false, false) => "Start session".to_owned(),
                                     })
                                     .loading(self.busy)
                                     .disabled(!can_start)

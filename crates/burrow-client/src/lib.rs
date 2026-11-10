@@ -39,6 +39,11 @@
 //! [`Subscription`] remembers the last seq it yielded; after a reconnect,
 //! [`Subscription::resume_params`] subscribes again from exactly there.
 //!
+//! Answers, events and notifications each have their own channel, so a caller can see a call's
+//! answer before or after a notification `burrowd` sent ahead of it. Where that order matters,
+//! as for terminals, [`Client::send_in_order`] delivers the answer through [`Notifications`]
+//! instead, in the order it arrived.
+//!
 //! [`Stream`]: futures_core::Stream
 
 mod connection;
@@ -63,7 +68,7 @@ use tokio::sync::oneshot;
 
 use crate::connection::Connection;
 pub use crate::error::{CallError, ConnectError};
-pub use crate::subscription::{Notifications, Subscription};
+pub use crate::subscription::{Incoming, Notifications, Subscription};
 
 /// How long [`Client::connect`] waits while every pipe instance is busy, by default.
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -217,6 +222,22 @@ impl Client {
         })
     }
 
+    /// Sends a request to `M` whose answer comes through this connection's [`Notifications`], as
+    /// [`Incoming::Answer`] with the returned id, in the order `burrowd` sent it among the
+    /// notifications. Returns at once; the request goes out after any sent before it.
+    ///
+    /// For answers that must be applied in order with notifications: a `terminal/attach`
+    /// snapshot before the first `terminal/update` that follows it, or a `terminal/scrollback`
+    /// page after exactly the updates `burrowd` sent before it. A plain [`Client::call`] answers
+    /// on its own channel, so its result and the notifications around it can be seen in either
+    /// order.
+    ///
+    /// Someone must be reading [`Client::notifications`]; the answer is dropped otherwise, and
+    /// when the connection closes first.
+    pub fn send_in_order<M: Method>(&self, params: &M::Params) -> Result<RequestId, CallError> {
+        self.inner.connection.send_in_order::<M>(params)
+    }
+
     /// Sends notification `N`. It gets no response.
     pub fn notify<N: NotificationMethod>(&self, params: &N::Params) -> Result<(), CallError> {
         self.inner.connection.notify::<N>(params)
@@ -258,7 +279,8 @@ impl Client {
         ))
     }
 
-    /// Incoming notifications other than `events/event`, which go to subscriptions.
+    /// Incoming notifications other than `events/event`, which go to subscriptions, and the
+    /// answers of requests sent with [`Client::send_in_order`].
     ///
     /// There is one consumer at a time: calling this again ends the previous stream.
     /// Notifications that arrive while nobody listens are dropped.

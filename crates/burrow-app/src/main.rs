@@ -53,6 +53,7 @@ fn main() {
             gpui_component::init(cx);
             theme::apply(cx);
             actions::bind_keys(cx);
+            views::terminal::bind_keys(cx);
             cx.set_global(backend);
             let state = cx.new(AppState::new);
 
