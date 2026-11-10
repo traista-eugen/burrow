@@ -601,6 +601,25 @@ async fn the_client_that_last_resized_or_typed_sets_the_size() {
     a.until("the typing", |m| m.contains("xyz")).await;
     assert_eq!((a.model.cols, a.model.rows), (100, 30));
 
+    // Reports the client's terminal sends by itself aren't typing (D-045): B's window takes
+    // the focus, and the mouse crosses it, while A's size is set.
+    resize(&other, &terminal, 80, 24).await;
+    a.until("80x24 on a", at(80, 24)).await;
+    input(&client, &terminal, "[O[I").await;
+    input(&client, &terminal, "[<35;5;5M[<39;6;5M").await;
+    // burrowd resizes before it answers the input, so a new client sees the size now.
+    let fourth = connect(&daemon.pipe).await;
+    let snapshot = fourth
+        .call::<TerminalAttach>(&TerminalIdParams {
+            terminal_id: terminal.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!((snapshot.cols, snapshot.rows), (80, 24));
+    // A click is: A's size again.
+    input(&client, &terminal, "[<0;5;5M[<0;5;5m").await;
+    a.until("100x30 after the click", at(100, 30)).await;
+
     // Sizes have bounds.
     let refused = third
         .call::<TerminalResize>(&TerminalResizeParams {

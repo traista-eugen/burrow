@@ -17,7 +17,8 @@
 //!   the last few sessions' views (D-036), and with them their attachments (D-043).
 //! - **Input** goes to `terminal/input`; **sizes** follow "the latest wins" ([`Sizing`], D-040):
 //!   this client resizes the terminal only when the user types here, or when it started the
-//!   session.
+//!   session. Focus and mouse-movement reports go to `terminal/input` too, but aren't typing
+//!   (D-045).
 //! - **When the program exits** the view is disabled: the last screen stays, readable,
 //!   selectable and scrollable, and the status line gives the exit code.
 //! - **The bell** flashes a thin border around the terminal.
@@ -33,6 +34,7 @@ use gpui::{
     SharedString, StyleRefinement, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
+use tracing::debug;
 
 use crate::state::AppState;
 use crate::state::session::SessionStore;
@@ -137,6 +139,16 @@ impl SessionTerminal {
         self.title.as_deref()
     }
 
+    #[cfg(test)]
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
+
+    #[cfg(test)]
+    pub fn view(&self) -> &Entity<TerminalView> {
+        &self.view
+    }
+
     /// Attaches once the session names its terminal; notes an exit its stream reports.
     fn follow_store(&mut self, cx: &mut Context<Self>) {
         let log = self.store.read(cx).log();
@@ -186,7 +198,7 @@ impl SessionTerminal {
                     view.set_disabled(disabled, cx);
                 });
                 if let Some(ask) = self.sizing.attached(size) {
-                    self.resize(ask, cx);
+                    self.resize(ask, "attached", cx);
                 }
             }
             TerminalMessage::Update(update) => {
@@ -244,6 +256,23 @@ impl SessionTerminal {
 
     /// What the terminal view asks for.
     fn on_view(&mut self, event: &TerminalEvent, cx: &mut Context<Self>) {
+        // The view lays out once, and may do so before the session names its terminal: its size
+        // is noted even then, so typing can ask for it later.
+        if let TerminalEvent::Resize { cols, rows } = event {
+            let size = TerminalSize {
+                cols: (*cols).clamp(TerminalSize::MIN_COLS, TerminalSize::MAX_COLS),
+                rows: (*rows).clamp(TerminalSize::MIN_ROWS, TerminalSize::MAX_ROWS),
+            };
+            let ask = self.sizing.view_fits(size);
+            if self.status == Status::Running
+                && let Some(ask) = ask
+            {
+                self.resize(ask, "the view resized", cx);
+            }
+            // The status line says whose size it is.
+            cx.notify();
+            return;
+        }
         let Some((terminal, key)) = self.attachment.clone() else {
             return;
         };
@@ -253,25 +282,18 @@ impl SessionTerminal {
                     return;
                 }
                 if let Some(size) = self.sizing.before_input() {
-                    self.resize(size, cx);
+                    self.resize(size, "typing", cx);
                 }
                 self.hub.read(cx).input(&terminal, data.clone(), cx);
             }
-            TerminalEvent::Resize { cols, rows } => {
-                let size = TerminalSize {
-                    cols: (*cols).clamp(TerminalSize::MIN_COLS, TerminalSize::MAX_COLS),
-                    rows: (*rows).clamp(TerminalSize::MIN_ROWS, TerminalSize::MAX_ROWS),
-                };
-                // Noted before the first snapshot too, so attaching can ask for it.
-                let ask = self.sizing.view_fits(size);
-                if self.status == Status::Running
-                    && let Some(ask) = ask
-                {
-                    self.resize(ask, cx);
+            // Focus changes and mouse movement: the program asked for them, but the user isn't
+            // using this terminal, so the size stays whoever's it is (D-045).
+            TerminalEvent::Report(data) => {
+                if self.status == Status::Running {
+                    self.hub.read(cx).input(&terminal, data.clone(), cx);
                 }
-                // The status line says whose size it is.
-                cx.notify();
             }
+            TerminalEvent::Resize { .. } => {}
             TerminalEvent::RequestHistory { before, count } => {
                 let limit = u32::try_from(*count).unwrap_or(MAX_PAGE);
                 self.hub
@@ -280,8 +302,16 @@ impl SessionTerminal {
         }
     }
 
-    fn resize(&mut self, size: TerminalSize, cx: &mut Context<Self>) {
+    /// Asks for `size`; `why` goes to the log.
+    fn resize(&mut self, size: TerminalSize, why: &str, cx: &mut Context<Self>) {
         if let Some((terminal, _)) = &self.attachment {
+            debug!(
+                terminal,
+                cols = size.cols,
+                rows = size.rows,
+                why,
+                "asking for a size"
+            );
             self.hub.read(cx).resize(terminal, size, cx);
         }
     }

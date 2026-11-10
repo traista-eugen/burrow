@@ -25,13 +25,14 @@
 //! client's copy, and only once the previous update has been written to its pipe (D-039). It
 //! also answers that client's `terminal/scrollback` requests, in order with its updates. Resize
 //! follows the "latest wins" rule (Q7, D-040): the connection keeps the size each client last
-//! asked for.
+//! asked for, and input other than [`reports`] the terminal sends by itself takes it (D-045).
 //!
 //! [`Terminals`] holds every terminal by id. Closed ones stay attachable, with their last
 //! screen and scrollback, until their session is archived or more than [`KEEP_CLOSED`] have
 //! closed since.
 
 pub mod client;
+pub mod reports;
 pub mod screen;
 
 use std::collections::{HashMap, VecDeque};

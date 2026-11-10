@@ -46,11 +46,12 @@ Every decision that shapes the architecture gets an entry here.
 | [D-037](#d-037-the-app-starts-burrowd-under-the-desktop-shell-out-of-its-own-process-tree) | The app starts `burrowd` under the desktop shell, out of its own process tree | 2026-11-09 | accepted; amends D-029's launch |
 | [D-038](#d-038-terminal-sessions-run-on-conpty-called-directly-and-are-created-inside-their-job-object) | Terminal sessions run on ConPTY, called directly, and are created inside their Job Object | 2026-11-10 | accepted |
 | [D-039](#d-039-terminals-are-emulated-in-burrowd-and-each-client-gets-paced-updates-that-scroll-its-copy) | Terminals are emulated in `burrowd`, and each client gets paced updates that scroll its copy | 2026-11-10 | accepted |
-| [D-040](#d-040-a-terminal-takes-the-size-of-the-client-that-last-resized-or-typed) | A terminal takes the size of the client that last resized or typed | 2026-11-10 | accepted; its last consequence amended by D-043 |
+| [D-040](#d-040-a-terminal-takes-the-size-of-the-client-that-last-resized-or-typed) | A terminal takes the size of the client that last resized or typed | 2026-11-10 | accepted; its last consequence amended by D-043, what counts as typing by D-045 |
 | [D-041](#d-041-the-terminal-view-sends-xterms-encodings-keeps-ctrlshiftc-and-v-for-the-clipboard-and-gives-a-focused-terminal-the-apps-keys) | The terminal view sends xterm's encodings, keeps Ctrl+Shift+C and V for the clipboard, and gives a focused terminal the app's keys | 2026-11-10 | accepted |
 | [D-042](#d-042-the-terminal-view-paints-a-glyph-per-cell-from-line-layouts-cached-by-version-in-one-paint-layer-per-row) | The terminal view paints a glyph per cell from line layouts cached by version, in one paint layer per row | 2026-11-10 | accepted; its last consequence amended by D-043 |
 | [D-043](#d-043-in-the-app-the-client-that-starts-a-terminal-session-sizes-it-open-views-stay-attached-and-the-keyboard-can-always-leave) | In the app, the client that starts a terminal session sizes it, open views stay attached, and the keyboard can always leave | 2026-11-10 | accepted; amends D-040's and D-042's last consequences |
 | [D-044](#d-044-burrow-client-can-deliver-an-answer-among-the-notifications-in-the-order-burrowd-sent-it) | `burrow-client` can deliver an answer among the notifications, in the order `burrowd` sent it | 2026-11-10 | accepted |
+| [D-045](#d-045-focus-and-mouse-movement-reports-arent-typing-and-keep-a-terminals-size) | Focus and mouse-movement reports aren't typing, and keep a terminal's size | 2026-11-10 | accepted; amends D-040 |
 
 ---
 
@@ -1104,3 +1105,26 @@ This amends D-029's launch, which tried only the last two.
 - Someone must read the notifications, or such answers are dropped. There is one reader per connection; in the app, that is the hub.
 - An answer sent this way has no `PendingCall`, so it can't be cancelled with `$/cancel`.
 - `burrowctl terminal attach` keeps plain calls: it reads no notification until it has its snapshot, so nothing can overtake it.
+
+## D-045 Focus and mouse-movement reports aren't typing, and keep a terminal's size
+
+**Decision.** Under "the latest wins" (D-040), input that is only reports a client's terminal sends by itself doesn't take the size:
+- focus changes, `ESC [ I` and `ESC [ O` (mode 1004);
+- the mouse moving with no button held (mode 1003), in SGR or X10 encoding, with or without Shift, Alt or Ctrl.
+
+`burrowd` checks this on the bytes of `terminal/input` (`terminals::reports`), for every client; anything else in the same input, a click, a drag or the wheel included, makes it typing. The app's terminal view emits these reports as `TerminalEvent::Report`, apart from `Input`, and the session's terminal sends them without taking the size, so its own size rule (D-043) agrees with `burrowd`'s.
+
+**Why.**
+- **Found on 2026-11-10:** opening a terminal session that `burrowctl` had started resized it to the app's view, though nobody typed in the app. ConPTY turns focus reporting on for every program (`ESC [ ? 1004 h`), the fake TUI included, so the view sent `ESC [ I` when it took the focus, and the app counted that as typing. ConPTY consumes focus reports, so the program never saw a key, but `burrowd` had resized first. Whether it happened depended on timing: on whether the view took the focus before or after the snapshot told it the program wanted reports.
+- **Neither is the user using that client.** A window gaining focus, or a pointer crossing a TUI that asks for every movement (Codex does), happens on a second screen without anyone touching the terminal. A click, a drag or the wheel is a deliberate use, like a key.
+- **In `burrowd`, on the bytes,** because `burrowctl` passes its console's focus reports through as input too, and any client should get the same rule.
+
+**Alternatives considered.**
+- **A flag on `terminal/input`** saying the input is a report: explicit, but every client would have to set it, and `burrowctl` only has its console's bytes.
+- **Only in the app:** `burrowd` would still give the app its remembered size on the next focus report, after another client had taken the size.
+- **Treating mouse movement as typing:** hovering over a terminal in one window would take it from the window being typed in.
+
+**Consequences.**
+- A report and a key in the same `terminal/input` count as typing. The app sends each report on its own.
+- Mouse motion in X10 encoding is recognised only while its coordinates are single bytes, which is where X10 stops anyway (D-041).
+- `burrowd` parses a few input sequences, for this rule only: `terminals/reports.rs`, with its tests.
