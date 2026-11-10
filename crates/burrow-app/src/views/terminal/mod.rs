@@ -24,7 +24,9 @@
 //! - [`TerminalView::apply_history`] with a page of scrollback it asked for.
 //!
 //! Subscribe to its [`TerminalEvent`]s:
-//! - [`TerminalEvent::Input`]: send as `terminal/input`;
+//! - [`TerminalEvent::Input`]: what the user typed, pasted or clicked: send as `terminal/input`;
+//! - [`TerminalEvent::Report`]: what the terminal reports by itself (focus changes, the mouse
+//!   moving with no button held): send as `terminal/input` too, but it isn't the user typing;
 //! - [`TerminalEvent::Resize`]: send as `terminal/resize`, debounced;
 //! - [`TerminalEvent::RequestHistory`]: fetch older scrollback and give it to `apply_history`.
 //!
@@ -129,8 +131,12 @@ pub fn grid_fitting(
 /// What the terminal view asks of whoever runs the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
-    /// Bytes to send as `terminal/input`.
+    /// Bytes the user typed, pasted or clicked: send as `terminal/input`.
     Input(String),
+    /// Bytes the terminal reports by itself, because the program asked: focus changes (mode
+    /// 1004) and the mouse moving with no button held (mode 1003). Send as `terminal/input`
+    /// too, but they aren't the user using this terminal, so they don't take its size (D-045).
+    Report(String),
     /// The grid that fits the view changed: send `terminal/resize`. Reported at once the first
     /// time, then after the size stays put for 80 ms.
     Resize { cols: u16, rows: u16 },
@@ -411,7 +417,7 @@ impl TerminalView {
         if let Some(bytes) = input::encode_focus(focused, &self.grid.modes())
             && !self.disabled
         {
-            cx.emit(TerminalEvent::Input(bytes.to_owned()));
+            cx.emit(TerminalEvent::Report(bytes.to_owned()));
         }
         self.activity(cx);
         cx.notify();
@@ -563,7 +569,7 @@ impl TerminalView {
                 &event.modifiers,
                 &self.grid.modes(),
             ) {
-                cx.emit(TerminalEvent::Input(bytes));
+                cx.emit(TerminalEvent::Report(bytes));
             }
         }
     }

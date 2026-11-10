@@ -259,7 +259,7 @@ fn run_program(
     let sender = to_host.clone();
     cx.subscribe(&terminal, move |_, _, event: &TerminalEvent, _| {
         let message = match event {
-            TerminalEvent::Input(text) => ToHost::Input(text.clone()),
+            TerminalEvent::Input(text) | TerminalEvent::Report(text) => ToHost::Input(text.clone()),
             TerminalEvent::Resize { cols, rows } => ToHost::Resize(*cols, *rows),
             TerminalEvent::RequestHistory { before, count } => ToHost::History {
                 before: *before,

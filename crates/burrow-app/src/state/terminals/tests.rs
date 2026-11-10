@@ -338,6 +338,13 @@ fn a_session_started_here_follows_the_view() {
 
 #[test]
 fn a_glance_changes_nothing_until_the_user_types() {
+    // The view laid out before the snapshot, or after it: neither asks for its size.
+    let mut early = Sizing::new(false);
+    assert_eq!(early.view_fits(size(120, 40)), None);
+    assert_eq!(early.attached(size(120, 32)), None);
+    assert_eq!(early.view_fits(size(120, 41)), None);
+    assert!(!early.holds());
+
     let mut sizing = Sizing::new(false);
     // Another client's size: shown as it is.
     assert_eq!(sizing.attached(size(80, 24)), None);

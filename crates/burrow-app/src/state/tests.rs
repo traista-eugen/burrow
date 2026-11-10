@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use burrow_client::{Client, ConnectOptions};
 use burrow_protocol::methods::{
-    ProjectAdd, SessionCreate, SessionPrompt, TerminalAttach, TerminalScrollback,
+    ProjectAdd, SessionCreate, SessionPrompt, TerminalAttach, TerminalDetach, TerminalScrollback,
 };
 use burrow_protocol::{
     AgentId, ClientInfo, ClientKind, ContentBlock, Event, ProjectAddParams, SessionCreateParams,
@@ -25,7 +25,8 @@ use super::session::SessionStore;
 use super::terminals::{Key, TerminalHub, TerminalMessage};
 use super::*;
 use crate::backend::BackendConfig;
-use crate::views::session::terminal::convert;
+use crate::views::session::terminal::{SessionTerminal, Status, convert};
+use crate::views::terminal::TerminalEvent;
 use crate::views::terminal::grid::TerminalGrid;
 
 fn unique_pipe(tag: &str) -> String {
@@ -461,4 +462,127 @@ fn a_terminal_session_runs_through_the_hub(cx: &mut TestAppContext) {
             .any(|row| row.contains("echo: after"))
     );
     assert!(seen.borrow().failed.is_none());
+}
+
+/// D-043 and D-045: opening a terminal session another client started leaves its size alone,
+/// though the view fits another grid, takes the focus and sees the mouse move, until the user
+/// types there. ConPTY turns focus reporting on for every program, so focusing the view sends
+/// the program a focus report.
+#[gpui::test]
+fn opening_a_terminal_session_keeps_its_size_until_the_user_types(cx: &mut TestAppContext) {
+    let Some(burrowd) = built_burrowd() else {
+        eprintln!("skipped: no burrowd.exe next to the tests; run `cargo build --workspace` first");
+        return;
+    };
+    cx.executor().allow_parking();
+    let pipe = unique_pipe("glance");
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _daemon = Daemon::start(&burrowd, &pipe, data.path());
+
+    // The session view's theme.
+    cx.update(gpui_component::init);
+    install_backend(cx, &pipe);
+    let state = cx.new(AppState::new);
+    wait_until(cx, "the connection", |cx| status(cx, &state).is_connected());
+
+    // Another client starts a terminal session, at the default 120 × 32.
+    let runtime = burrow_client::io_runtime().unwrap();
+    let other = runtime.block_on(async {
+        let info = ClientInfo {
+            name: "test".into(),
+            version: "0".into(),
+            kind: ClientKind::Cli,
+        };
+        Client::connect(ConnectOptions::new(info).pipe(pipe.clone()))
+            .await
+            .unwrap()
+    });
+    let session = runtime
+        .block_on(other.call::<SessionCreate>(&SessionCreateParams {
+            mode: SessionMode::Terminal,
+            ..SessionCreateParams::new(AgentId::Fake, dir.path().to_string_lossy())
+        }))
+        .unwrap();
+    let terminal = session.terminal_id.clone().expect("Session.terminalId");
+    let params = TerminalIdParams {
+        terminal_id: terminal.clone(),
+    };
+    // The terminal's size and modes, as burrowd has them now.
+    let now = || {
+        let snapshot = runtime
+            .block_on(other.call::<TerminalAttach>(&params))
+            .unwrap();
+        runtime
+            .block_on(other.call::<TerminalDetach>(&params))
+            .unwrap();
+        snapshot
+    };
+    let first = now();
+    assert_eq!((first.cols, first.rows), (120, 32));
+
+    // This app opens it, as the session view does: in a window, not started here.
+    let store = cx.new(|cx| SessionStore::new(session.id.clone(), cx));
+    let window = cx.add_window(|window, cx| SessionTerminal::new(store, state, false, window, cx));
+    window
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    let view = window.read_with(cx, |this, _| this.view().clone()).unwrap();
+    let sent = Rc::new(RefCell::new(Vec::<TerminalEvent>::new()));
+    let _subscription = cx.update({
+        let sent = sent.clone();
+        |cx| {
+            cx.subscribe(&view, move |_, event: &TerminalEvent, _| {
+                sent.borrow_mut().push(event.clone())
+            })
+        }
+    });
+    wait_until(cx, "the terminal", |cx| {
+        let running = window
+            .read_with(cx, |this, _| this.status() == &Status::Running)
+            .unwrap();
+        running && view.read_with(cx, |view, _| view.size().is_some())
+    });
+    // The view fits another grid than the terminal's.
+    let fits = view.read_with(cx, |view, _| view.size()).unwrap();
+    assert_ne!(fits, (120, 32));
+
+    // It takes the focus, as opening a session does, once ConPTY has asked for focus reports
+    // (it does a moment after the program starts).
+    wait_until(cx, "focus reporting", |cx| {
+        view.read_with(cx, |view, _| view.grid().modes().focus_reporting)
+    });
+    window
+        .update(cx, |this, window, cx| this.focus(window, cx))
+        .unwrap();
+    wait_until(cx, "the focus report", |_| {
+        sent.borrow()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Report(data) if data == "\x1b[I"))
+    });
+    // The mouse crosses it, in a program that asks for every movement.
+    view.update(cx, |_, cx| {
+        cx.emit(TerminalEvent::Report("\x1b[<35;5;5M".into()))
+    });
+    // Nothing the user did: the size stays the other client's.
+    let quiet = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < quiet {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !sent
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Input(_)))
+    );
+    let after = now();
+    assert_eq!((after.cols, after.rows), (120, 32));
+
+    // The user types: the terminal takes the view's size first.
+    view.update(cx, |_, cx| cx.emit(TerminalEvent::Input("x".into())));
+    wait_until(cx, "the view's size", |_| {
+        let snapshot = now();
+        (snapshot.cols, snapshot.rows) == fits
+    });
 }

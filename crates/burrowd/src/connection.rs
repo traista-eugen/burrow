@@ -52,6 +52,7 @@ use crate::projects::Projects;
 use crate::sessions::Sessions;
 use crate::terminals::Terminals;
 use crate::terminals::client::{PageRequest, Updates};
+use crate::terminals::reports;
 use crate::{ids, methods, wire};
 
 /// Lines waiting to be written to one client.
@@ -578,7 +579,7 @@ impl Connection {
     }
 
     /// `terminal/input`. Under "latest wins" (D-040), a client that types gets the size it last
-    /// asked for.
+    /// asked for; focus and mouse-movement reports aren't typing (D-045).
     fn terminal_input(&mut self, params: TerminalInputParams) -> Result<Empty, ErrorObject> {
         let terminal = self.context.terminals.get(&params.terminal_id)?;
         if let Some(wanted) = self
@@ -586,6 +587,7 @@ impl Connection {
             .get(&params.terminal_id)
             .and_then(|attachment| attachment.wanted)
             && terminal.exit().is_none()
+            && !reports::only_reports(&params.data)
         {
             terminal.resize(wanted)?;
         }

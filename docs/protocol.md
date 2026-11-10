@@ -556,7 +556,7 @@ So the client's copy of the screen, and of every scrollback line it has seen scr
 
 **Input.** `data` is UTF-8 text with escape sequences for special keys, encoded for the current `modes`: arrows as `ESC [ A`, or `ESC O A` with `appCursor`; Enter as `\r`; pastes wrapped when `bracketedPaste` is on; mouse reports when `mouse` asks for them. Burrow doesn't offer the kitty keyboard protocol, so programs use these legacy encodings. Input is written to the program in the order requests arrive on a connection; `burrowd` handles `terminal/input`, `terminal/resize`, `terminal/attach` and `terminal/detach` in order, before reading the connection's next line. Input waiting for a program that doesn't read it is capped at 1 MiB, beyond which `terminal/input` is `invalidState`; so is input to a terminal whose program has exited.
 
-**Size (Q7, D-040): the latest wins.** A terminal starts at the size `session/create` gave, else 120 × 32. `terminal/resize` sets its size (2–1000 columns, 1–500 rows, else `-32602`), and the connection remembers it as what that client wants. When an attached client sends `terminal/input` and last asked for a size other than the terminal's, the terminal takes that size first. So whoever types gets their size, and the others draw the grid at it: every client gets the `reset` update. Attaching changes nothing, and a client that never resized types without changing the size.
+**Size (Q7, D-040): the latest wins.** A terminal starts at the size `session/create` gave, else 120 × 32. `terminal/resize` sets its size (2–1000 columns, 1–500 rows, else `-32602`), and the connection remembers it as what that client wants. When an attached client sends `terminal/input` and last asked for a size other than the terminal's, the terminal takes that size first. So whoever types gets their size, and the others draw the grid at it: every client gets the `reset` update. Attaching changes nothing, and a client that never resized types without changing the size. Input that is only reports a client's terminal sends by itself isn't typing, and keeps the size (D-045): focus changes (`ESC [ I`, `ESC [ O`; ConPTY turns focus reporting on for every program), and the mouse moving with no button held, in SGR or X10 encoding. A click, a drag or the wheel is typing.
 
 **Lifecycle.**
 - **Attaching** twice on one connection is `invalidState`; detach first. An unknown terminal is `notFound`. Detaching a terminal that isn't attached does nothing.
@@ -842,6 +842,8 @@ Which language gets an SDK first is an open decision ([plan.md](plan.md#open-dec
 - **`session/create` gained `cols?` and `rows?`:** a terminal session's first size, so the TUI's first screen fits the client. This settles the open question about a terminal's first size.
 - **`Session` gained `terminalId?`:** a terminal session's terminal, so a client that reads the session can attach without replaying its stream.
 - **`SessionSummary` gained `mode`,** and a session's **`entityCreated` gained `mode?`,** so a list can mark terminal sessions without `session/get`. A summary from an older `burrowd` has no `mode`, which reads as structured.
+
+**2026-11-10, reports aren't typing (D-045).** No type changes. `terminal/input` that is only focus reports, or the mouse moving with no button held, no longer gives the terminal the sending client's size. Found when opening a terminal session in the app resized it: ConPTY turns focus reporting on for every program, and the app's view reported its focus.
 
 ## Open questions
 
